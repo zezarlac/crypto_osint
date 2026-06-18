@@ -1,4 +1,4 @@
-"""
+""
 modules/blockchain.py — CryptoWalletOSINT
 Fetches wallet data from public blockchain APIs.
 
@@ -92,12 +92,12 @@ class BlockchainFetcher:
     def _fetch_ethereum(self, address: str, max_tx: int) -> dict:
         """Etherscan API — free key required."""
         key = self.cfg.ETHERSCAN_API_KEY
-        base = "https://api.etherscan.io/api"
+        base = "https://api.etherscan.io/v2/api"
 
         try:
             # Balance
             bal = self.s.get(base, params={
-                "module": "account", "action": "balance",
+		"chainid": 1, "module": "account", "action": "balance",
                 "address": address, "tag": "latest", "apikey": key
             }, timeout=self.cfg.TIMEOUT).json()
             balance_eth = int(bal.get("result", 0)) / 1e18
@@ -105,6 +105,7 @@ class BlockchainFetcher:
 
             # Normal transactions
             txs_r = self.s.get(base, params={
+		"chainid": 1,
                 "module": "account", "action": "txlist",
                 "address": address, "startblock": 0,
                 "endblock": 99999999, "page": 1,
