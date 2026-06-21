@@ -1,26 +1,35 @@
 """
 modules/osint.py — CryptoWalletOSINT
-Searches public sources for mentions of a wallet address
-and extracts identifiers (emails, usernames, phones) found
-in close proximity to the address in public posts.
+Searches public sources for mentions of a wallet address, extracts
+identifiers found nearby, and pivots from those identifiers into a
+small cross-platform identity check.
 
 Sources (all publicly accessible, no login required):
-  • DuckDuckGo (HTML endpoint)
-  • Reddit public search API
+  • DuckDuckGo (HTML endpoint)            — general web mentions
+  • Twitter/X, Telegram, broader Reddit   — via site-restricted
+    DDG queries (reuses the same scraper)
+  • Reddit public search API              — submissions
   • GitHub public code search API
   • BitcoinTalk forum search
+  • Google-dork-style queries             — leaked docs, paste
+    sites, alternate code hosts
+  • On-chain public comments/tags         — Etherscan / WalletExplorer
+    (best-effort HTML scrape; page structure can change)
 
-Note: This module only processes information voluntarily
-made public by users. It does NOT access breach databases
-or any private data.
+Every result is tagged with a confidence level ("high"/"medium"/"low")
+based on whether the address literally appears in the matched text,
+to filter out loose/fuzzy search-engine matches.
+
+Note: This module only processes information voluntarily made public
+by users. It does NOT access breach databases or any private data.
 """
 
 import re
 import time
-from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 from config import Config
+from modules.pivot import IdentityPivot
 
 
 class OSINTSearcher:
@@ -40,60 +49,91 @@ class OSINTSearcher:
         self._re_username = re.compile(r"@([a-zA-Z0-9_]{2,50})")
         self._re_telegram = re.compile(r"t\.me/([a-zA-Z0-9_]{4,32})")
 
-    # ── Public entry point ─────────────────────────────────────
+    # ── Public entry point ───────────────────────────────────────
 
-    def search_all(self, address: str) -> dict:
+    def search_all(self, address: str, chain: str = None) -> dict:
         """
-        Run all OSINT searches and return aggregated results
-        including extracted identifiers from all found text.
+        Run all OSINT searches, extract identifiers, and pivot from
+        them into a cross-platform identity check.
         """
-        web    = self._search_duckduckgo(address)
-        time.sleep(1.5)
-        reddit = self._search_reddit(address)
-        time.sleep(1.5)
-        github = self._search_github(address)
-        time.sleep(1.5)
-        btalk  = self._search_bitcointalk(address)
+        web      = self._search_duckduckgo(address)
+        time.sleep(self.cfg.RATE_DELAY * 5)
+        reddit   = self._search_reddit(address)
+        time.sleep(self.cfg.RATE_DELAY * 5)
+        github   = self._search_github(address)
+        time.sleep(self.cfg.RATE_DELAY * 5)
+        btalk    = self._search_bitcointalk(address)
+        time.sleep(self.cfg.RATE_DELAY * 5)
+        twitter  = self._search_twitter(address)
+        time.sleep(self.cfg.RATE_DELAY * 5)
+        telegram = self._search_telegram(address)
+        time.sleep(self.cfg.RATE_DELAY * 5)
+        reddit_c = self._search_reddit_comments(address)
+        time.sleep(self.cfg.RATE_DELAY * 5)
+        dorks    = self._run_dorks(address)
+        onchain  = self._search_onchain_comments(address, chain) if chain else []
 
-        # Collect all visible text for entity extraction
+        # ── Confidence tagging (literal-match filtering) ──
+        for bucket in (web, twitter, telegram, reddit_c, dorks):
+            for r in bucket:
+                if "error" not in r:
+                    r["confidence"] = self._confidence(
+                        address, r.get("title", "") + " " + r.get("snippet", "")
+                    )
+        for r in reddit:
+            if "error" not in r:
+                r["confidence"] = "high"   # native API, address was the literal query
+        for r in github:
+            if "error" not in r:
+                r["confidence"] = "high"   # code search only returns literal matches
+        for r in btalk:
+            if "error" not in r:
+                r["confidence"] = self._confidence(address, r.get("title", ""))
+
+        # ── Entity extraction from all gathered text ──
         corpus = []
-        for r in web:
+        for r in web + twitter + telegram + reddit_c + dorks:
             corpus.append(r.get("title", "") + " " + r.get("snippet", ""))
         for r in reddit:
-            corpus.append(
-                r.get("title", "") + " "
-                + r.get("text", "") + " u/"
-                + r.get("author", "")
-            )
+            corpus.append(r.get("title", "") + " " + r.get("text", "") + " u/" + r.get("author", ""))
         for r in btalk:
             corpus.append(r.get("title", ""))
-
+        for r in onchain:
+            corpus.append(r.get("text", ""))
         entities = self._extract_entities(" ".join(corpus))
 
+        # ── Identity pivot (username/email → cross-platform check) ──
+        pivot_results = {}
+        if entities.get("usernames") or entities.get("emails"):
+            pivoter = IdentityPivot()
+            pivot_results = pivoter.pivot_all(entities)
+
         return {
-            "web":                web,
-            "reddit":             reddit,
-            "github":             github,
-            "bitcointalk":        btalk,
+            "web":               web,
+            "reddit":            reddit,
+            "github":            github,
+            "bitcointalk":       btalk,
+            "twitter":           twitter,
+            "telegram":          telegram,
+            "reddit_comments":   reddit_c,
+            "dorks":             dorks,
+            "onchain_comments":  onchain,
             "extracted_entities": entities,
+            "pivot":             pivot_results,
         }
 
-    # ── Source: DuckDuckGo ─────────────────────────────────────
+    # ── Generic DuckDuckGo search (reused by all site-restricted queries) ──
 
-    def _search_duckduckgo(self, address: str) -> list:
-        """
-        POST to DuckDuckGo's HTML interface with the address
-        quoted for exact match.
-        """
+    def _search_ddg(self, query: str, max_results: int = 8) -> list:
         results = []
         try:
             resp = self.s.post(
                 "https://html.duckduckgo.com/html/",
-                data={"q": f'"{address}"'},
+                data={"q": query},
                 timeout=self.cfg.TIMEOUT,
             )
             soup = BeautifulSoup(resp.text, "html.parser")
-            for div in soup.find_all("div", class_="result__body")[:10]:
+            for div in soup.find_all("div", class_="result__body")[:max_results]:
                 title_a   = div.find("a", class_="result__a")
                 snippet_a = div.find("a", class_="result__snippet")
                 if title_a:
@@ -106,7 +146,49 @@ class OSINTSearcher:
             results.append({"error": str(e)})
         return results
 
-    # ── Source: Reddit ─────────────────────────────────────────
+    def _search_duckduckgo(self, address: str) -> list:
+        """General web mentions, exact-match quoted."""
+        return self._search_ddg(f'"{address}"')
+
+    # ── Expanded sources (Twitter/X, Telegram, Reddit comments) ──
+
+    def _search_twitter(self, address: str) -> list:
+        return self._search_ddg(f'"{address}" (site:twitter.com OR site:x.com)')
+
+    def _search_telegram(self, address: str) -> list:
+        return self._search_ddg(f'"{address}" site:t.me')
+
+    def _search_reddit_comments(self, address: str) -> list:
+        """
+        Reddit's native search API covers submissions; this dork-style
+        query surfaces comment threads too (which often contain the
+        address in replies, e.g. scam reports).
+        """
+        return self._search_ddg(f'"{address}" site:reddit.com')
+
+    # ── Google-dork-style sweeps ───────────────────────────────────
+
+    def _run_dorks(self, address: str) -> list:
+        """
+        Targeted operator-based queries aimed at leak-style discovery:
+        documents, paste sites, and code hosts beyond GitHub.
+        """
+        dorks = [
+            ("leaked documents", f'"{address}" (filetype:pdf OR filetype:csv OR filetype:xlsx OR filetype:txt)'),
+            ("paste sites",      f'"{address}" (site:pastebin.com OR site:ghostbin.com OR site:controlc.com)'),
+            ("code hosting",     f'"{address}" (site:gitlab.com OR site:bitbucket.org OR site:sourceforge.net)'),
+        ]
+        results = []
+        for label, query in dorks:
+            hits = self._search_ddg(query, max_results=5)
+            for h in hits:
+                if "error" not in h:
+                    h["dork"] = label
+            results.extend(hits)
+            time.sleep(self.cfg.RATE_DELAY)
+        return results
+
+    # ── Source: Reddit (native submission search) ──────────────────
 
     def _search_reddit(self, address: str) -> list:
         """Reddit public JSON search API — no auth required."""
@@ -132,7 +214,7 @@ class OSINTSearcher:
             results.append({"error": str(e)})
         return results
 
-    # ── Source: GitHub ─────────────────────────────────────────
+    # ── Source: GitHub ───────────────────────────────────────────────
 
     def _search_github(self, address: str) -> list:
         """
@@ -170,7 +252,7 @@ class OSINTSearcher:
             results.append({"error": str(e)})
         return results
 
-    # ── Source: BitcoinTalk ────────────────────────────────────
+    # ── Source: BitcoinTalk ───────────────────────────────────────────
 
     def _search_bitcointalk(self, address: str) -> list:
         """Scrape BitcoinTalk forum search results."""
@@ -193,17 +275,77 @@ class OSINTSearcher:
             results.append({"error": str(e)})
         return results
 
-    # ── Entity extraction ──────────────────────────────────────
+    # ── Source: On-chain public comments/tags ──────────────────────────
+
+    def _search_onchain_comments(self, address: str, chain: str) -> list:
+        """
+        Best-effort scrape of public community comments/tags directly
+        attached to the address on a block explorer (Etherscan's
+        "Public Name Tag" + comments, WalletExplorer's service label
+        for Bitcoin). These are often the single richest signal since
+        they're tied to the address itself, not a fuzzy text match.
+
+        Page structure on these sites can change at any time — this
+        degrades gracefully to an empty list if parsing fails.
+        """
+        results = []
+        try:
+            if chain == "ethereum":
+                r = self.s.get(f"https://etherscan.io/address/{address}", timeout=15)
+                soup = BeautifulSoup(r.text, "html.parser")
+
+                tag_el = soup.find(attrs={"class": re.compile("u-label", re.I)})
+                if tag_el:
+                    txt = tag_el.get_text(strip=True)
+                    if txt:
+                        results.append({"source": "Etherscan Public Name Tag", "text": txt})
+
+                for c in soup.find_all(attrs={"class": re.compile("comment|note", re.I)})[:10]:
+                    txt = c.get_text(strip=True)
+                    if txt and len(txt) > 5:
+                        results.append({"source": "Etherscan Comment", "text": txt[:300]})
+
+            elif chain == "bitcoin":
+                r = self.s.get(f"https://www.walletexplorer.com/address/{address}", timeout=15)
+                soup = BeautifulSoup(r.text, "html.parser")
+                label_el = soup.find("h1")
+                if label_el:
+                    txt = label_el.get_text(strip=True)
+                    if txt and address[:10] not in txt:
+                        results.append({"source": "WalletExplorer Label", "text": txt})
+        except Exception as e:
+            results.append({"error": str(e)})
+        return results
+
+    # ── Confidence scoring ──────────────────────────────────────────────
+
+    def _confidence(self, address: str, text: str) -> str:
+        """
+        Rate how likely a search result genuinely contains the wallet
+        address verbatim, vs. a loose/fuzzy search-engine match.
+          high   — full address found verbatim
+          medium — a truncated/displayed form found (e.g. "0x1234…abcd")
+          low    — address not actually present in the matched text
+        """
+        if not text:
+            return "low"
+        if address in text or address.lower() in text.lower():
+            return "high"
+        head, tail = address[:10], address[-6:]
+        if head in text and tail in text:
+            return "medium"
+        return "low"
+
+    # ── Entity extraction ────────────────────────────────────────────────
 
     def _extract_entities(self, text: str) -> dict:
         """
-        Extract potential personal identifiers from aggregated
-        public text. These identifiers were publicly posted by
-        their owners alongside the wallet address.
+        Extract potential personal identifiers from aggregated public
+        text. These identifiers were publicly posted by their owners
+        alongside the wallet address.
         """
         emails = list(set(self._re_email.findall(text)))
 
-        # Filter phone-like strings: require ≥10 digits
         raw_phones = self._re_phone.findall(text)
         phones = list({
             p.strip() for p in raw_phones
