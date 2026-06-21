@@ -15,8 +15,9 @@ wallet comparison, and surface-level identity correlation from public web data.
 |--------|-------------|
 | **Detector** | Auto-detects chain from address format (BTC, ETH, LTC, DOGE, TRX) |
 | **Blockchain** | Fetches balance, full TX history, input/output addresses via free public APIs |
-| **OSINT** | Searches DuckDuckGo, Reddit, GitHub, BitcoinTalk for address mentions |
-| **Entity extract** | Pulls emails, phone patterns, usernames found *publicly posted* near the address |
+| **OSINT** | Searches DuckDuckGo, Twitter/X, Telegram, Reddit (posts+comments), GitHub, BitcoinTalk, plus Google-dork-style sweeps and on-chain public tags |
+| **Identity pivot** | Cross-platform check on found usernames/emails — GitHub, Keybase, Telegram, Gravatar, GitHub commit authorship |
+| **Entity extract** | Pulls emails, phone patterns, usernames found *publicly posted* near the address, confidence-scored against literal address matches |
 | **Multi-hop tracer** | Follows funds 2-3 hops beyond the target, prioritizing the largest transfers |
 | **Sanctions/mixer screening** | Flags addresses against a curated OFAC SDN sample (Tornado Cash, Blender.io, Garantex, Hydra Market) — runs automatically, no API cost |
 | **Wallet comparator** | Compares 2+ wallets and finds shared counterparties — evidence of common ownership |
@@ -28,7 +29,7 @@ wallet comparison, and surface-level identity correlation from public web data.
 ## Setup
 
 ```bash
-git clone https://github.com/yourusername/crypto-wallet-osint
+git clone https://github.com/zezarlac/crypto_osint
 cd crypto-wallet-osint
 pip install -r requirements.txt
 ```
@@ -126,7 +127,38 @@ Addresses on different chains are grouped and compared separately.
 
 ---
 
-## APIs used
+## OSINT capabilities in detail
+
+`--osint` runs a multi-stage investigation, not just one search:
+
+1. **Direct mentions** — DuckDuckGo (general web), Twitter/X and Telegram
+   (via site-restricted queries), Reddit (both submissions and comments),
+   GitHub code search, BitcoinTalk forum.
+2. **Google-dork-style sweeps** — targeted operator queries for leaked
+   documents (`filetype:pdf/csv/xlsx`), paste sites (Pastebin, Ghostbin,
+   ControlC), and code hosts beyond GitHub (GitLab, Bitbucket, SourceForge).
+3. **On-chain public tags** — best-effort scrape of Etherscan's Public Name
+   Tag/comments (ETH) and WalletExplorer's service label (BTC). These are
+   tied directly to the address itself rather than a fuzzy text match, so
+   they're often the highest-signal source. *Page structure on these sites
+   can change — this degrades to an empty result if parsing fails.*
+4. **Confidence scoring** — every web/social/dork hit is tagged `high`
+   (address found verbatim), `medium` (truncated/displayed form found,
+   e.g. `0x1234…abcd`), or `low` (likely a loose search-engine match).
+   Reports show high/medium hits prominently and note how many low-confidence
+   results were filtered out (full data stays in the JSON export).
+5. **Identity pivot** — once a username or email is extracted, it's checked
+   against:
+   - **GitHub** — profile existence + commit-author search by email
+   - **Keybase** — profile + linked social proofs (often surfaces Twitter/
+     Reddit/GitHub for the same person in a single call)
+   - **Telegram** — public username resolution
+   - **Gravatar** — public profile tied to an email's hash
+
+   This is capped at 5 usernames / 3 emails per run to stay fast and
+   within free-tier rate limits.
+
+
 
 | Service | Chain | Key needed |
 |---------|-------|-----------|
@@ -172,7 +204,8 @@ crypto_osint/
 └── modules/
     ├── detector.py     ← chain detection by regex
     ├── blockchain.py   ← BTC / ETH / TRX / LTC / DOGE APIs
-    ├── osint.py        ← web OSINT + entity extraction
+    ├── osint.py        ← web/social OSINT + dorks + on-chain tags + entity extraction
+    ├── pivot.py         ← identity pivot (username/email → cross-platform check)
     ├── screening.py    ← sanctions/mixer watchlist checks
     ├── tracer.py        ← multi-hop fund tracing
     ├── comparator.py    ← shared-counterparty wallet comparison
