@@ -8,6 +8,8 @@ Run before pushing: python test_local.py
 import sys
 import os
 import json
+import tempfile
+import shutil
 from datetime import datetime
 
 # ── colors ────────────────────────────────────────────────────
@@ -78,6 +80,148 @@ test(
             (_ for _ in ()).throw(AssertionError("empty or wrong type")),
 )
 
+# ── 1b. Screening (sanctions/mixer watchlist) ──────────────────
+print(f"\n{BOLD}[1b] Screening — Sanctions/Mixer Watchlist{RESET}")
+from modules.screening import Screener
+
+screener = Screener()
+
+def _screener_loads():
+    stats = screener.stats()
+    assert stats["total_entries"] >= 30, f"expected >=30 entries, got {stats['total_entries']}"
+
+def _screener_finds_known_eth():
+    # Real OFAC-sanctioned Tornado Cash address (sourced from ofac.treasury.gov)
+    match = screener.check("0x8589427373D6D84E98730D7795D8f6f8731FDA16")
+    assert match is not None
+    assert match["entity"] == "Tornado Cash"
+    assert "mixer" in match["category"]
+
+def _screener_case_insensitive_eth():
+    # lowercase variant should still match
+    match = screener.check("0x8589427373d6d84e98730d7795d8f6f8731fda16")
+    assert match is not None
+
+def _screener_finds_known_btc():
+    match = screener.check("3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3")
+    assert match is not None
+    assert match["entity"] == "Blender.io"
+
+def _screener_clean_address():
+    match = screener.check("1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na")
+    assert match is None
+
+def _screener_check_many():
+    hits = screener.check_many([
+        "0x8589427373D6D84E98730D7795D8f6f8731FDA16",
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na",
+    ])
+    assert len(hits) == 1
+
+test("Screener loads bundled dataset (30+ entries)", _screener_loads)
+test("Screener flags known Tornado Cash address",     _screener_finds_known_eth)
+test("Screener is case-insensitive for ETH",          _screener_case_insensitive_eth)
+test("Screener flags known Blender.io address",       _screener_finds_known_btc)
+test("Screener returns None for a clean address",     _screener_clean_address)
+test("Screener.check_many() filters correctly",       _screener_check_many)
+
+# ── 1c. Shared parsing utils ────────────────────────────────────
+print(f"\n{BOLD}[1c] Utils — Transaction Parsing{RESET}")
+from modules.utils import extract_counterparties, extract_edges
+
+UTIL_BTC_WALLET = {
+    "address": "TARGET_BTC", "chain": "bitcoin",
+    "transactions": [
+        {"txid": "tx1", "inputs": ["coinbase"],
+         "outputs": [{"address": "TARGET_BTC", "value_btc": 1.0}]},
+        {"txid": "tx2", "inputs": ["TARGET_BTC"],
+         "outputs": [{"address": "PEER_A", "value_btc": 0.5},
+                     {"address": "PEER_B", "value_btc": 0.4}]},
+    ],
+}
+
+def _util_counterparties_btc():
+    peers = extract_counterparties("TARGET_BTC", UTIL_BTC_WALLET)
+    assert peers == {"PEER_A", "PEER_B"}, peers
+
+def _util_edges_btc():
+    edges = extract_edges("TARGET_BTC", UTIL_BTC_WALLET, hop=1)
+    out_edges = [e for e in edges if e["from"] == "TARGET_BTC"]
+    assert len(out_edges) == 2
+    assert all(e["hop"] == 1 for e in edges)
+
+test("extract_counterparties() — Bitcoin",  _util_counterparties_btc)
+test("extract_edges() — Bitcoin",           _util_edges_btc)
+
+# ── 1d. Comparator ───────────────────────────────────────────────
+print(f"\n{BOLD}[1d] Wallet Comparator{RESET}")
+from modules.comparator import WalletComparator
+
+WALLET_A = {
+    "address": "WALLET_A", "chain": "bitcoin",
+    "transactions": [
+        {"txid": "t1", "inputs": ["WALLET_A"],
+         "outputs": [{"address": "SHARED_EXCHANGE", "value_btc": 1.0}]},
+    ],
+}
+WALLET_B = {
+    "address": "WALLET_B", "chain": "bitcoin",
+    "transactions": [
+        {"txid": "t2", "inputs": ["WALLET_B"],
+         "outputs": [{"address": "SHARED_EXCHANGE", "value_btc": 2.0}]},
+    ],
+}
+WALLET_C = {
+    "address": "WALLET_C", "chain": "bitcoin",
+    "transactions": [
+        {"txid": "t3", "inputs": ["WALLET_C"],
+         "outputs": [{"address": "UNRELATED_ADDR", "value_btc": 1.0}]},
+    ],
+}
+
+def _comparator_finds_shared():
+    comp = WalletComparator({"WALLET_A": WALLET_A, "WALLET_B": WALLET_B, "WALLET_C": WALLET_C})
+    result = comp.compare()
+    assert "SHARED_EXCHANGE" in result["shared"]
+    assert set(result["shared"]["SHARED_EXCHANGE"]) == {"WALLET_A", "WALLET_B"}
+    assert "UNRELATED_ADDR" not in result["shared"]
+
+def _comparator_report_generates():
+    comp = WalletComparator({"WALLET_A": WALLET_A, "WALLET_B": WALLET_B})
+    result = comp.compare()
+    tmp = tempfile.mkdtemp()
+    paths = comp.generate_report(result, out_dir=tmp)
+    assert os.path.exists(paths["json"])
+    assert os.path.exists(paths["txt"])
+    assert os.path.exists(paths["html"])
+    shutil.rmtree(tmp, ignore_errors=True)
+
+test("WalletComparator finds shared counterparty", _comparator_finds_shared)
+test("WalletComparator generates JSON/TXT/HTML",   _comparator_report_generates)
+
+# ── 1e. Multi-hop tracer (offline-safe parts only) ───────────────
+print(f"\n{BOLD}[1e] Multi-hop Tracer (offline logic){RESET}")
+from modules.tracer import MultiHopTracer
+
+def _tracer_top_counterparties():
+    tracer = MultiHopTracer(max_per_hop=2)
+    edges = [
+        {"from": "SRC", "to": "A", "value": 5.0},
+        {"from": "SRC", "to": "B", "value": 1.0},
+        {"from": "SRC", "to": "C", "value": 10.0},
+    ]
+    top = tracer._top_counterparties(edges, "SRC", visited={"SRC"})
+    assert top == ["C", "A"], top   # ranked by value desc, capped at max_per_hop=2
+
+def _tracer_excludes_visited():
+    tracer = MultiHopTracer(max_per_hop=5)
+    edges = [{"from": "SRC", "to": "ALREADY_SEEN", "value": 99.0}]
+    top = tracer._top_counterparties(edges, "SRC", visited={"SRC", "ALREADY_SEEN"})
+    assert top == []
+
+test("Tracer ranks counterparties by value, capped", _tracer_top_counterparties)
+test("Tracer excludes already-visited addresses",    _tracer_excludes_visited)
+
 # ── 2. Report generator (no-network) ─────────────────────────
 print(f"\n{BOLD}[2] Report Generator{RESET}")
 from modules.report import ReportGenerator
@@ -116,7 +260,6 @@ FAKE_OSINT = {
 }
 
 # Create reports in a temp dir
-import tempfile, shutil
 tmp = tempfile.mkdtemp()
 
 def make_reporter():
@@ -159,6 +302,24 @@ def _html_has_content():
     assert "Genesis block" in html
 
 test("HTML report contains expected data", _html_has_content)
+
+def _report_auto_screening():
+    # A wallet that sent funds to a known-sanctioned mixer address
+    # should show up as flagged in the report automatically.
+    wallet = {
+        "address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na", "chain": "bitcoin",
+        "balance_btc": 0, "total_received_btc": 0, "total_sent_btc": 1.0,
+        "tx_count": 1,
+        "transactions": [
+            {"txid": "txflag", "inputs": ["1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na"],
+             "outputs": [{"address": "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3", "value_btc": 1.0}]},
+        ],
+    }
+    rep = ReportGenerator("1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na", "bitcoin", wallet)
+    assert "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3" in rep.screening
+    shutil.rmtree(rep.out_dir, ignore_errors=True)
+
+test("ReportGenerator auto-screens counterparties", _report_auto_screening)
 
 shutil.rmtree(tmp, ignore_errors=True)
 
@@ -206,6 +367,45 @@ def _graph_export():
 test("Bitcoin graph builds correctly",   _graph_bitcoin)
 test("Ethereum graph nodes & edges",     _graph_eth)
 test("Graph JSON export works",          _graph_export)
+
+def _graph_from_trace():
+    fake_trace = {
+        "target": "TARGET_X", "chain": "bitcoin", "depth": 2,
+        "nodes": {
+            "TARGET_X": {"hop": 0},
+            "HOP1_A":   {"hop": 1},
+            "HOP2_A":   {"hop": 2},
+        },
+        "edges": [
+            {"from": "TARGET_X", "to": "HOP1_A", "txid": "tx1", "value": 1.0, "hop": 1},
+            {"from": "HOP1_A",   "to": "HOP2_A", "txid": "tx2", "value": 0.5, "hop": 2},
+        ],
+        "hop_counts": {1: 1, 2: 1},
+        "flagged": {},
+        "total_addresses": 3,
+    }
+    g = TransactionGraph.from_trace(fake_trace)
+    stats = g.get_stats()
+    assert stats["nodes"] == 3, stats["nodes"]
+    assert stats["edges"] == 2, stats["edges"]
+    assert g.depth == 2
+
+def _graph_flags_sanctioned_node():
+    # Tornado Cash address should be auto-flagged when building the graph
+    wallet = {
+        "address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na", "chain": "bitcoin",
+        "transactions": [
+            {"txid": "tx1", "inputs": ["1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na"],
+             "outputs": [{"address": "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3", "value_btc": 1.0}]},
+        ],
+    }
+    g = TransactionGraph(wallet)
+    g.build()
+    stats = g.get_stats()
+    assert "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3" in stats["flagged"]
+
+test("TransactionGraph.from_trace() builds multi-hop graph", _graph_from_trace)
+test("Graph auto-flags sanctioned addresses",                _graph_flags_sanctioned_node)
 
 # ── 4. OSINT entity extractor (no-network) ────────────────────
 print(f"\n{BOLD}[4] OSINT — Entity Extractor{RESET}")
