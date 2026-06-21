@@ -169,21 +169,49 @@ class ReportGenerator:
         # ── OSINT ──
         if self.osint:
             lines += ["", "── OSINT FINDINGS " + "─" * 44]
-            web    = self.osint.get("web", [])
-            reddit = self.osint.get("reddit", [])
-            github = self.osint.get("github", [])
-            btalk  = self.osint.get("bitcointalk", [])
-            ent    = self.osint.get("extracted_entities", {})
+            web      = self.osint.get("web", [])
+            reddit   = self.osint.get("reddit", [])
+            github   = self.osint.get("github", [])
+            btalk    = self.osint.get("bitcointalk", [])
+            twitter  = self.osint.get("twitter", [])
+            telegram = self.osint.get("telegram", [])
+            reddit_c = self.osint.get("reddit_comments", [])
+            dorks    = self.osint.get("dorks", [])
+            onchain  = self.osint.get("onchain_comments", [])
+            pivot    = self.osint.get("pivot", {})
+            ent      = self.osint.get("extracted_entities", {})
 
-            lines.append(f"  Web results    : {len(web)}")
-            for r in web[:4]:
-                lines.append(f"    • {r.get('title','')[:55]}")
+            def _filtered(bucket):
+                """Only show high/medium confidence hits; count the rest."""
+                shown  = [r for r in bucket if r.get("confidence") in ("high", "medium")]
+                hidden = len(bucket) - len(shown)
+                return shown, hidden
+
+            web_s, web_h = _filtered(web)
+            lines.append(f"  Web results    : {len(web)}  ({web_h} low-confidence omitted)" if web_h else f"  Web results    : {len(web)}")
+            for r in web_s[:4]:
+                lines.append(f"    • [{r.get('confidence','?')}] {r.get('title','')[:50]}")
                 lines.append(f"      {r.get('url','')[:70]}")
 
-            lines.append(f"\n  Reddit results : {len(reddit)}")
+            lines.append(f"\n  Reddit posts   : {len(reddit)}")
             for r in reddit[:3]:
                 lines.append(f"    • r/{r.get('subreddit','')} — {r.get('title','')[:50]}")
                 lines.append(f"      Author: u/{r.get('author','')}  |  {r.get('url','')}")
+
+            rc_s, rc_h = _filtered(reddit_c)
+            lines.append(f"  Reddit comments: {len(reddit_c)}  ({rc_h} low-confidence omitted)" if rc_h else f"  Reddit comments: {len(reddit_c)}")
+            for r in rc_s[:3]:
+                lines.append(f"    • [{r.get('confidence','?')}] {r.get('title','')[:55]}")
+
+            tw_s, tw_h = _filtered(twitter)
+            lines.append(f"\n  Twitter/X      : {len(twitter)}  ({tw_h} low-confidence omitted)" if tw_h else f"\n  Twitter/X      : {len(twitter)}")
+            for r in tw_s[:3]:
+                lines.append(f"    • [{r.get('confidence','?')}] {r.get('title','')[:55]}")
+
+            tg_s, tg_h = _filtered(telegram)
+            lines.append(f"  Telegram       : {len(telegram)}  ({tg_h} low-confidence omitted)" if tg_h else f"  Telegram       : {len(telegram)}")
+            for r in tg_s[:3]:
+                lines.append(f"    • [{r.get('confidence','?')}] {r.get('title','')[:55]}")
 
             lines.append(f"\n  GitHub results : {len(github)}")
             for g in github[:3]:
@@ -194,6 +222,17 @@ class ReportGenerator:
             for b in btalk[:3]:
                 lines.append(f"    • {b.get('title','')[:55]}")
 
+            dk_s, dk_h = _filtered(dorks)
+            lines.append(f"\n  Dorks (leaks)  : {len(dorks)}  ({dk_h} low-confidence omitted)" if dk_h else f"\n  Dorks (leaks)  : {len(dorks)}")
+            for r in dk_s[:5]:
+                lines.append(f"    • [{r.get('dork','?')}] [{r.get('confidence','?')}] {r.get('title','')[:45]}")
+                lines.append(f"      {r.get('url','')[:70]}")
+
+            lines.append(f"\n  On-chain tags  : {len(onchain)}")
+            for o in onchain[:5]:
+                if "error" not in o:
+                    lines.append(f"    • [{o.get('source','')}] {o.get('text','')[:70]}")
+
             if ent.get("emails"):
                 lines.append(f"\n  Emails found   : {', '.join(ent['emails'][:5])}")
             if ent.get("phones"):
@@ -202,6 +241,30 @@ class ReportGenerator:
                 lines.append(f"  Usernames      : {', '.join(ent['usernames'][:6])}")
             if ent.get("telegrams"):
                 lines.append(f"  Telegram       : {', '.join(ent['telegrams'][:4])}")
+
+            # ── Identity pivot ──
+            if pivot.get("usernames") or pivot.get("emails"):
+                lines += ["", "── IDENTITY PIVOT (cross-platform check) " + "─" * 23]
+                for username, checks in pivot.get("usernames", {}).items():
+                    gh, kb, tg = checks.get("github", {}), checks.get("keybase", {}), checks.get("telegram", {})
+                    lines.append(f"  @{username}")
+                    if gh.get("exists"):
+                        lines.append(f"    ✓ GitHub   : {gh.get('url','')} ({gh.get('public_repos',0)} repos)")
+                    if kb.get("exists"):
+                        lines.append(f"    ✓ Keybase  : linked to {', '.join(kb.get('linked_proofs', [])) or '—'}")
+                    if tg.get("exists"):
+                        lines.append(f"    ✓ Telegram : {tg.get('url','')}")
+                    if not any((gh.get("exists"), kb.get("exists"), tg.get("exists"))):
+                        lines.append("    (no matches on checked platforms)")
+                for email, checks in pivot.get("emails", {}).items():
+                    gr, gc = checks.get("gravatar", {}), checks.get("github_commits", {})
+                    lines.append(f"  {email}")
+                    if gr.get("exists"):
+                        lines.append(f"    ✓ Gravatar : {gr.get('display_name','')} — {gr.get('profile_url','')}")
+                    if gc.get("exists"):
+                        lines.append(f"    ✓ GitHub commits : {gc.get('github_username','')} ({gc.get('commits_found',0)} commit(s))")
+                    if not any((gr.get("exists"), gc.get("exists"))):
+                        lines.append("    (no matches on checked platforms)")
 
         lines += [
             "",
@@ -310,28 +373,59 @@ class ReportGenerator:
 
         # OSINT section
         osint_html = ""
+        pivot_html = ""
         if self.osint:
-            web    = self.osint.get("web", [])
-            reddit = self.osint.get("reddit", [])
-            github = self.osint.get("github", [])
-            btalk  = self.osint.get("bitcointalk", [])
-            ent    = self.osint.get("extracted_entities", {})
+            web      = self.osint.get("web", [])
+            reddit   = self.osint.get("reddit", [])
+            github   = self.osint.get("github", [])
+            btalk    = self.osint.get("bitcointalk", [])
+            twitter  = self.osint.get("twitter", [])
+            telegram = self.osint.get("telegram", [])
+            reddit_c = self.osint.get("reddit_comments", [])
+            dorks    = self.osint.get("dorks", [])
+            onchain  = self.osint.get("onchain_comments", [])
+            pivot    = self.osint.get("pivot", {})
+            ent      = self.osint.get("extracted_entities", {})
 
-            reddit_li = "".join(
+            def _conf_badge(r):
+                lvl = r.get("confidence", "low")
+                cls = {"high": "conf-high", "medium": "conf-med", "low": "conf-low"}.get(lvl, "conf-low")
+                return f"<span class='{cls}'>{lvl}</span>"
+
+            def _li_list(bucket, fmt, only_conf=True):
+                shown = [r for r in bucket if not only_conf or r.get("confidence") in ("high", "medium")]
+                return "".join(fmt(r) for r in shown[:6]) or "<li>No results</li>"
+
+            reddit_li = _li_list(reddit, lambda r: (
                 f"<li><a href='{r.get('url','')}' target='_blank'>"
                 f"r/{r.get('subreddit','')} — {r.get('title','')[:60]}</a>"
                 f" <span class='by'>u/{r.get('author','')}</span></li>"
-                for r in reddit[:6]
-            )
-            github_li = "".join(
+            ), only_conf=False)
+            github_li = _li_list(github, lambda g: (
                 f"<li><a href='{g.get('url','')}' target='_blank'>"
                 f"{g.get('repo','')} / {g.get('file','')}</a></li>"
-                for g in github[:6]
-            )
-            web_li = "".join(
-                f"<li><a href='{r.get('url','')}' target='_blank'>{r.get('title','')[:70]}</a></li>"
-                for r in web[:6]
-            )
+            ), only_conf=False)
+            web_li = _li_list(web, lambda r: (
+                f"<li>{_conf_badge(r)} <a href='{r.get('url','')}' target='_blank'>{r.get('title','')[:70]}</a></li>"
+            ))
+            twitter_li = _li_list(twitter, lambda r: (
+                f"<li>{_conf_badge(r)} <a href='{r.get('url','')}' target='_blank'>{r.get('title','')[:60]}</a></li>"
+            ))
+            telegram_li = _li_list(telegram, lambda r: (
+                f"<li>{_conf_badge(r)} <a href='{r.get('url','')}' target='_blank'>{r.get('title','')[:60]}</a></li>"
+            ))
+            reddit_c_li = _li_list(reddit_c, lambda r: (
+                f"<li>{_conf_badge(r)} <a href='{r.get('url','')}' target='_blank'>{r.get('title','')[:60]}</a></li>"
+            ))
+            dorks_li = _li_list(dorks, lambda r: (
+                f"<li>{_conf_badge(r)} <span class='dork-tag'>[{r.get('dork','')}]</span> "
+                f"<a href='{r.get('url','')}' target='_blank'>{r.get('title','')[:55]}</a></li>"
+            ))
+            onchain_li = "".join(
+                f"<li><span class='dork-tag'>[{o.get('source','')}]</span> {o.get('text','')[:120]}</li>"
+                for o in onchain if "error" not in o
+            ) or "<li>No on-chain comments/tags found</li>"
+
             emails    = ", ".join(ent.get("emails", [])[:5])    or "—"
             phones    = ", ".join(ent.get("phones", [])[:3])    or "—"
             usernames = ", ".join(ent.get("usernames", [])[:6]) or "—"
@@ -341,10 +435,14 @@ class ReportGenerator:
 <div class="card">
   <h2>🔍 OSINT Findings</h2>
   <div class="grid4">
-    <div class="stat"><span>{len(web)}</span>Web results</div>
-    <div class="stat"><span>{len(reddit)}</span>Reddit posts</div>
-    <div class="stat"><span>{len(github)}</span>GitHub refs</div>
+    <div class="stat"><span>{len(web)}</span>Web</div>
+    <div class="stat"><span>{len(twitter)}</span>Twitter/X</div>
+    <div class="stat"><span>{len(telegram)}</span>Telegram</div>
+    <div class="stat"><span>{len(reddit) + len(reddit_c)}</span>Reddit</div>
+    <div class="stat"><span>{len(github)}</span>GitHub</div>
     <div class="stat"><span>{len(btalk)}</span>BitcoinTalk</div>
+    <div class="stat"><span>{len(dorks)}</span>Dorks</div>
+    <div class="stat"><span>{len(onchain)}</span>On-chain tags</div>
   </div>
 
   <h3>Extracted identifiers <small>(found in public posts near this address)</small></h3>
@@ -356,9 +454,44 @@ class ReportGenerator:
     <tr><td>✈️ Telegram</td><td>{telegrams}</td></tr>
   </table>
 
-  <h3>Web mentions</h3><ul>{web_li or '<li>No results</li>'}</ul>
-  <h3>Reddit</h3><ul>{reddit_li or '<li>No results</li>'}</ul>
-  <h3>GitHub</h3><ul>{github_li or '<li>No results</li>'}</ul>
+  <h3>On-chain public tags/comments <small>(Etherscan / WalletExplorer, best-effort)</small></h3>
+  <ul>{onchain_li}</ul>
+
+  <h3>Web mentions</h3><ul>{web_li}</ul>
+  <h3>Twitter/X</h3><ul>{twitter_li}</ul>
+  <h3>Telegram</h3><ul>{telegram_li}</ul>
+  <h3>Reddit posts</h3><ul>{reddit_li}</ul>
+  <h3>Reddit comments</h3><ul>{reddit_c_li}</ul>
+  <h3>GitHub</h3><ul>{github_li}</ul>
+  <h3>Dorks <small>(leaked docs, paste sites, alt code hosts)</small></h3><ul>{dorks_li}</ul>
+</div>"""
+
+            # ── Identity pivot card ──
+            if pivot.get("usernames") or pivot.get("emails"):
+                rows = ""
+                for username, checks in pivot.get("usernames", {}).items():
+                    gh, kb, tg = checks.get("github", {}), checks.get("keybase", {}), checks.get("telegram", {})
+                    if gh.get("exists"):
+                        rows += f"<tr><td>@{username}</td><td>GitHub</td><td>✓ <a href='{gh.get('url','')}' target='_blank'>{gh.get('url','')}</a> ({gh.get('public_repos',0)} repos)</td></tr>"
+                    if kb.get("exists"):
+                        rows += f"<tr><td>@{username}</td><td>Keybase</td><td>✓ linked: {', '.join(kb.get('linked_proofs', [])) or '—'}</td></tr>"
+                    if tg.get("exists"):
+                        rows += f"<tr><td>@{username}</td><td>Telegram</td><td>✓ <a href='{tg.get('url','')}' target='_blank'>{tg.get('url','')}</a></td></tr>"
+                    if not any((gh.get("exists"), kb.get("exists"), tg.get("exists"))):
+                        rows += f"<tr><td>@{username}</td><td>—</td><td class='dim'>no matches on checked platforms</td></tr>"
+                for email, checks in pivot.get("emails", {}).items():
+                    gr, gc = checks.get("gravatar", {}), checks.get("github_commits", {})
+                    if gr.get("exists"):
+                        rows += f"<tr><td>{email}</td><td>Gravatar</td><td>✓ {gr.get('display_name','')} — <a href='{gr.get('profile_url','')}' target='_blank'>{gr.get('profile_url','')}</a></td></tr>"
+                    if gc.get("exists"):
+                        rows += f"<tr><td>{email}</td><td>GitHub commits</td><td>✓ {gc.get('github_username','')} ({gc.get('commits_found',0)} commit(s))</td></tr>"
+                    if not any((gr.get("exists"), gc.get("exists"))):
+                        rows += f"<tr><td>{email}</td><td>—</td><td class='dim'>no matches on checked platforms</td></tr>"
+
+                pivot_html = f"""
+<div class="card">
+  <h2>🧬 Identity Pivot — Cross-platform Footprint</h2>
+  <table><tr><th>Identifier</th><th>Platform</th><th>Result</th></tr>{rows}</table>
 </div>"""
 
         label_badge = (
@@ -399,6 +532,11 @@ tr:hover td{{background:#1a1a30}}
 .out{{color:#f87171;font-weight:600}}
 .in_{{color:#34d399;font-weight:600}}
 .by{{color:#64748b;font-size:11px;margin-left:6px}}
+.conf-high{{background:#0f1c14;color:#86efac;border:1px solid #166534;padding:1px 6px;border-radius:8px;font-size:10px;margin-right:4px}}
+.conf-med{{background:#1a1200;color:#fcd34d;border:1px solid #78350f;padding:1px 6px;border-radius:8px;font-size:10px;margin-right:4px}}
+.conf-low{{background:#1c0f0f;color:#fca5a5;border:1px solid #7f1d1d;padding:1px 6px;border-radius:8px;font-size:10px;margin-right:4px}}
+.dork-tag{{color:#818cf8;font-size:10px;font-weight:600}}
+.dim{{color:#64748b;font-size:11px}}
 ul{{list-style:none;padding:0}}
 li{{padding:5px 0;border-bottom:1px solid #1e1b4b;font-size:12px}}
 .err{{background:#1c0f0f;border:1px solid #7f1d1d;color:#fca5a5;padding:10px;border-radius:8px;margin-top:10px;font-size:12px}}
@@ -436,6 +574,8 @@ li{{padding:5px 0;border-bottom:1px solid #1e1b4b;font-size:12px}}
 </div>
 
 {osint_html}
+
+{pivot_html}
 
 {screening_html}
 
