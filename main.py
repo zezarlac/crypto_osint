@@ -43,7 +43,7 @@ BANNER = """\
  ██║     ██╔══██╗  ╚██╔╝  ██╔═══╝    ██║   ██║   ██║   ██║   ██║╚════██║██║██║╚██╗██║   ██║
  ╚██████╗██║  ██║   ██║   ██║        ██║   ╚██████╔╝   ╚██████╔╝███████║██║██║ ╚████║   ██║
   ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝        ╚═╝    ╚═════╝     ╚═════╝ ╚══════╝╚═╝╚═╝  ╚═══╝   ╚═╝[/bold purple]
-[dim]              Cryptocurrency Wallet OSINT Tool by zezarlac ·  Educational Use Only[/dim]
+[dim]              Cryptocurrency Wallet OSINT Tool  ·  Educational Use Only[/dim]
 """
 
 
@@ -115,21 +115,45 @@ def print_wallet_table(data: dict):
 
 
 def print_osint_table(osint: dict):
-    ent    = osint.get("extracted_entities", {})
-    web    = osint.get("web", [])
-    reddit = osint.get("reddit", [])
-    github = osint.get("github", [])
-    btalk  = osint.get("bitcointalk", [])
+    ent      = osint.get("extracted_entities", {})
+    web      = osint.get("web", [])
+    reddit   = osint.get("reddit", [])
+    github   = osint.get("github", [])
+    btalk    = osint.get("bitcointalk", [])
+    twitter  = osint.get("twitter", [])
+    telegram = osint.get("telegram", [])
+    reddit_c = osint.get("reddit_comments", [])
+    dorks    = osint.get("dorks", [])
+    onchain  = osint.get("onchain_comments", [])
+
+    def _conf_counts(bucket):
+        c = {"high": 0, "medium": 0, "low": 0}
+        for r in bucket:
+            lvl = r.get("confidence")
+            if lvl in c:
+                c[lvl] += 1
+        return c
 
     t = Table(title="OSINT Findings", box=box.ROUNDED, border_style="blue")
-    t.add_column("Source",   style="cyan", width=16)
-    t.add_column("Hits",     width=6)
+    t.add_column("Source",      style="cyan", width=18)
+    t.add_column("Hits",        width=6)
+    t.add_column("High/Med conf.", width=14)
     t.add_column("Top result", style="dim")
 
-    t.add_row("Web (DDG)",   str(len(web)),    web[0].get("title", "—")[:55]    if web    else "—")
-    t.add_row("Reddit",      str(len(reddit)), f"r/{reddit[0].get('subreddit','')} — {reddit[0].get('title','')[:40]}" if reddit else "—")
-    t.add_row("GitHub",      str(len(github)), github[0].get("repo", "—")[:55]  if github else "—")
-    t.add_row("BitcoinTalk", str(len(btalk)),  btalk[0].get("title", "—")[:55]  if btalk  else "—")
+    def _row(label, bucket, top_text):
+        c = _conf_counts(bucket)
+        t.add_row(label, str(len(bucket)), f"{c['high']}/{c['medium']}", top_text[:55] if top_text else "—")
+
+    _row("Web (DDG)",       web,      web[0].get("title", "")    if web      else "")
+    _row("Twitter/X",       twitter,  twitter[0].get("title", "") if twitter  else "")
+    _row("Telegram",        telegram, telegram[0].get("title", "") if telegram else "")
+    _row("Reddit (posts)",  reddit,   f"r/{reddit[0].get('subreddit','')} — {reddit[0].get('title','')}" if reddit else "")
+    _row("Reddit (comments)", reddit_c, reddit_c[0].get("title", "") if reddit_c else "")
+    _row("GitHub",          github,   github[0].get("repo", "")  if github   else "")
+    _row("BitcoinTalk",     btalk,    btalk[0].get("title", "")  if btalk    else "")
+    _row("Dorks (leaks)",   dorks,    f"[{dorks[0].get('dork','')}] {dorks[0].get('title','')}" if dorks else "")
+    t.add_row("On-chain tags", str(len(onchain)), "—",
+               onchain[0].get("text", "")[:55] if onchain and "error" not in onchain[0] else "—")
 
     emails = ent.get("emails", [])
     phones = ent.get("phones", [])
@@ -137,13 +161,57 @@ def print_osint_table(osint: dict):
     tgrams = ent.get("telegrams", [])
 
     if emails:
-        t.add_row("📧 Emails",    str(len(emails)), ", ".join(emails[:3]))
+        t.add_row("📧 Emails",    str(len(emails)), "", ", ".join(emails[:3]))
     if phones:
-        t.add_row("📞 Phones",    str(len(phones)), ", ".join(phones[:2]))
+        t.add_row("📞 Phones",    str(len(phones)), "", ", ".join(phones[:2]))
     if users:
-        t.add_row("👤 Usernames", str(len(users)),  ", ".join(users[:4]))
+        t.add_row("👤 Usernames", str(len(users)),  "", ", ".join(users[:4]))
     if tgrams:
-        t.add_row("✈️ Telegram",  str(len(tgrams)), ", ".join(tgrams[:3]))
+        t.add_row("✈️ Telegram",  str(len(tgrams)), "", ", ".join(tgrams[:3]))
+
+    console.print(t)
+    console.print(
+        "[dim]  (High/Med conf. = results where the address was literally found in "
+        "the text, vs. a loose search-engine match)[/dim]"
+    )
+
+
+def print_pivot_table(pivot: dict):
+    usernames = pivot.get("usernames", {})
+    emails    = pivot.get("emails", {})
+    if not usernames and not emails:
+        return
+
+    t = Table(title="🧬 Identity Pivot — Cross-platform Footprint",
+              box=box.ROUNDED, border_style="magenta")
+    t.add_column("Identifier", style="cyan")
+    t.add_column("Platform")
+    t.add_column("Result")
+
+    for username, checks in usernames.items():
+        gh = checks.get("github", {})
+        kb = checks.get("keybase", {})
+        tg = checks.get("telegram", {})
+        if gh.get("exists"):
+            t.add_row(f"@{username}", "GitHub", f"✓ {gh.get('url','')}  ({gh.get('public_repos',0)} repos)")
+        if kb.get("exists"):
+            proofs = ", ".join(kb.get("linked_proofs", [])) or "—"
+            t.add_row(f"@{username}", "Keybase", f"✓ linked: {proofs}")
+        if tg.get("exists"):
+            t.add_row(f"@{username}", "Telegram", f"✓ {tg.get('url','')}")
+        if not any((gh.get("exists"), kb.get("exists"), tg.get("exists"))):
+            t.add_row(f"@{username}", "—", "[dim]no matches on checked platforms[/dim]")
+
+    for email, checks in emails.items():
+        gr = checks.get("gravatar", {})
+        gc = checks.get("github_commits", {})
+        if gr.get("exists"):
+            t.add_row(email, "Gravatar", f"✓ {gr.get('display_name','')} — {gr.get('profile_url','')}")
+        if gc.get("exists"):
+            t.add_row(email, "GitHub commits",
+                      f"✓ {gc.get('github_username','')} ({gc.get('commits_found',0)} commit(s))")
+        if not any((gr.get("exists"), gc.get("exists"))):
+            t.add_row(email, "—", "[dim]no matches on checked platforms[/dim]")
 
     console.print(t)
 
@@ -319,12 +387,16 @@ def main():
     # ── Step 5: OSINT ─────────────────────────────────────────
     osint_data = {}
     if args.osint:
-        console.print("[yellow]⟳[/yellow]  Running OSINT searches (may take ~10 s)…")
+        console.print("[yellow]⟳[/yellow]  Running OSINT searches (extended sources + "
+                       "dorks + identity pivot — may take 30-60 s)…")
         searcher   = OSINTSearcher()
-        osint_data = searcher.search_all(args.address)
+        osint_data = searcher.search_all(args.address, chain)
         console.print("[green]✓[/green]  OSINT searches complete\n")
         print_osint_table(osint_data)
         console.print()
+        if osint_data.get("pivot"):
+            print_pivot_table(osint_data["pivot"])
+            console.print()
 
     # ── Step 6: Transaction graph ─────────────────────────────
     graph_path = ""
