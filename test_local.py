@@ -443,6 +443,125 @@ test("Extracts @username from text",  _extract_username)
 test("Extracts t.me/ Telegram link",  _extract_telegram)
 test("Returns empty lists for clean text", _extract_empty)
 
+# ── 5. Confidence scoring (literal-match filtering) ───────────
+print(f"\n{BOLD}[5] OSINT — Confidence Scoring{RESET}")
+
+ADDR = "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na"
+
+def _conf_high_full_match():
+    lvl = searcher._confidence(ADDR, f"Found wallet {ADDR} sending funds")
+    assert lvl == "high", lvl
+
+def _conf_high_case_insensitive():
+    eth = "0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe"
+    lvl = searcher._confidence(eth, f"address {eth.lower()} flagged")
+    assert lvl == "high", lvl
+
+def _conf_medium_truncated():
+    truncated = ADDR[:10] + "..." + ADDR[-6:]
+    lvl = searcher._confidence(ADDR, f"wallet {truncated} seen on exchange")
+    assert lvl == "medium", lvl
+
+def _conf_low_no_match():
+    lvl = searcher._confidence(ADDR, "this text mentions a totally different wallet")
+    assert lvl == "low", lvl
+
+def _conf_low_empty_text():
+    lvl = searcher._confidence(ADDR, "")
+    assert lvl == "low", lvl
+
+test("Confidence: full literal match → high",      _conf_high_full_match)
+test("Confidence: case-insensitive ETH → high",     _conf_high_case_insensitive)
+test("Confidence: truncated display → medium",      _conf_medium_truncated)
+test("Confidence: no match → low",                  _conf_low_no_match)
+test("Confidence: empty text → low",                _conf_low_empty_text)
+
+# ── 6. Identity Pivot — offline structure tests ────────────────
+print(f"\n{BOLD}[6] Identity Pivot (offline structure){RESET}")
+from modules.pivot import IdentityPivot
+
+def _pivot_instantiates():
+    p = IdentityPivot()
+    assert p.s is not None
+
+def _pivot_all_caps_inputs():
+    # Verify pivot_all() respects the MAX_*_TO_CHECK caps without
+    # making real network calls — patch the per-identifier checkers.
+    p = IdentityPivot()
+    p.check_username = lambda u: {"github": {"exists": False}, "keybase": {"exists": False}, "telegram": {"exists": False}}
+    p.check_email     = lambda e: {"gravatar": {"exists": False}, "github_commits": {"exists": False}}
+    entities = {
+        "usernames": [f"user{i}" for i in range(10)],
+        "emails":    [f"user{i}@example.com" for i in range(10)],
+    }
+    result = p.pivot_all(entities)
+    assert len(result["usernames"]) <= 5, len(result["usernames"])
+    assert len(result["emails"]) <= 3, len(result["emails"])
+
+test("IdentityPivot instantiates without network calls", _pivot_instantiates)
+test("pivot_all() respects MAX_*_TO_CHECK caps",          _pivot_all_caps_inputs)
+
+# ── 7. Expanded OSINT sources — query construction (offline) ───
+print(f"\n{BOLD}[7] OSINT — Expanded Sources & Dorks (offline){RESET}")
+
+def _ddg_helper_handles_errors_gracefully():
+    # No network in this sandbox — _search_ddg() must never raise,
+    # regardless of whether the proxy returns a connection error
+    # (→ caught exception, [{"error": ...}]) or a deny-page response
+    # with zero parseable results (→ empty list). Either is a valid
+    # "degrade gracefully" outcome; a crash is not.
+    results = searcher._search_ddg('"test query"')
+    assert isinstance(results, list)
+
+def _dorks_are_labeled():
+    # _run_dorks should tag every successful hit with which dork
+    # matched, or degrade to an error entry — either way, no crash.
+    results = searcher._run_dorks(ADDR)
+    assert isinstance(results, list)
+
+test("_search_ddg() degrades gracefully without network", _ddg_helper_handles_errors_gracefully)
+test("_run_dorks() runs without crashing",                 _dorks_are_labeled)
+
+# ── 8. Report — extended OSINT sections render ──────────────────
+print(f"\n{BOLD}[8] Report — Extended OSINT Sections{RESET}")
+
+EXTENDED_OSINT = {
+    "web": [{"title": "Wallet mentioned in forum post", "url": "https://example.com/1",
+             "snippet": f"the address {ADDR} was used", "confidence": "high"}],
+    "reddit": [], "github": [], "bitcointalk": [],
+    "twitter": [{"title": "Tip jar tweet", "url": "https://x.com/u/1",
+                 "snippet": ADDR, "confidence": "high"}],
+    "telegram": [], "reddit_comments": [],
+    "dorks": [{"title": "Leaked CSV", "url": "https://pastebin.com/x", "dork": "paste sites",
+               "snippet": ADDR, "confidence": "high"}],
+    "onchain_comments": [{"source": "Etherscan Comment", "text": "Reported as scammer"}],
+    "extracted_entities": {"emails": [], "phones": [], "usernames": ["satoshi"], "telegrams": []},
+    "pivot": {
+        "usernames": {"satoshi": {"github": {"exists": True, "url": "https://github.com/satoshi", "public_repos": 3},
+                                   "keybase": {"exists": False}, "telegram": {"exists": False}}},
+        "emails": {},
+    },
+}
+
+def _report_renders_extended_sections():
+    rep = ReportGenerator(ADDR, "bitcoin", FAKE_WALLET, EXTENDED_OSINT)
+    original_dir = rep.out_dir
+    tmp2 = tempfile.mkdtemp()
+    rep.out_dir = tmp2
+    txt_path  = rep._txt()
+    html_path = rep._html()
+    txt  = open(txt_path).read()
+    html = open(html_path).read()
+    assert "Twitter/X" in txt
+    assert "IDENTITY PIVOT" in txt
+    assert "Identity Pivot" in html
+    assert "github.com/satoshi" in html
+    assert "paste sites" in txt
+    shutil.rmtree(tmp2, ignore_errors=True)
+    shutil.rmtree(original_dir, ignore_errors=True)
+
+test("Report renders extended OSINT + pivot sections", _report_renders_extended_sections)
+
 # ── Summary ───────────────────────────────────────────────────
 total = passed + failed
 print(f"\n{'─' * 50}")
