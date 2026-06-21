@@ -2,23 +2,42 @@
 modules/report.py — CryptoWalletOSINT
 Generates analysis reports in JSON, TXT, and HTML formats.
 All reports are saved in reports/<address[:8]>_<timestamp>/
+
+Automatically screens the target + its counterparties (and any
+multi-hop trace nodes) against the local sanctions/mixer watchlist.
 """
 
 import json
 import os
 from datetime import datetime
 
+from modules.screening import Screener
+from modules.utils import extract_counterparties
+
 
 class ReportGenerator:
     def __init__(self, address: str, chain: str,
-                 wallet_data: dict, osint_data: dict = None):
+                 wallet_data: dict, osint_data: dict = None,
+                 trace_result: dict = None):
         self.address  = address
         self.chain    = chain
         self.wallet   = wallet_data
         self.osint    = osint_data or {}
+        self.trace    = trace_result or {}
         self.ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.out_dir  = os.path.join("reports", f"{address[:8]}_{self.ts}")
         os.makedirs(self.out_dir, exist_ok=True)
+
+        self.screener  = Screener()
+        self.screening = self._run_screening()
+
+    def _run_screening(self) -> dict:
+        """Screen target + direct counterparties (and trace nodes, if any)."""
+        addresses = {self.address}
+        addresses |= extract_counterparties(self.address, self.wallet)
+        if self.trace:
+            addresses |= set(self.trace.get("nodes", {}).keys())
+        return self.screener.check_many(addresses)
 
     # ── Entry point ───────────────────────────────────────────
 
@@ -40,13 +59,15 @@ class ReportGenerator:
         payload = {
             "meta": {
                 "tool":      "CryptoWalletOSINT",
-                "version":   "1.0",
+                "version":   "1.1",
                 "generated": datetime.now().isoformat(),
                 "target":    self.address,
                 "chain":     self.chain,
             },
-            "blockchain": self.wallet,
-            "osint":      self.osint,
+            "blockchain":      self.wallet,
+            "osint":           self.osint,
+            "screening":       self.screening,
+            "multihop_trace":  self.trace,
         }
         path = os.path.join(self.out_dir, "report.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -96,9 +117,12 @@ class ReportGenerator:
         txs = W.get("transactions", [])
         for i, tx in enumerate(txs[:30], 1):
             if chain == "bitcoin":
-                lines.append(f"  [{i:02d}] {tx.get('txid','?')[:20]}…  block={tx.get('block','unconfirmed')}")
+                lines.append(f"  [{i:02d}] TxID  : {tx.get('txid','?')}")
+                lines.append(f"        Block : {tx.get('block','unconfirmed')}")
                 for out in tx.get("outputs", [])[:3]:
-                    lines.append(f"        → {out.get('address','?')[:30]}  {out.get('value_btc',0):.6f} BTC")
+                    lines.append(f"        → {out.get('address','?')}")
+                    lines.append(f"          {out.get('value_btc',0):.8f} BTC")
+                lines.append("")
             elif chain in ("ethereum", "tron"):
                 key_val = "value_eth" if chain == "ethereum" else "value_trx"
                 unit    = "ETH" if chain == "ethereum" else "TRX"
@@ -106,11 +130,41 @@ class ReportGenerator:
                 to  = tx.get("to",  "?")
                 direction = "→ OUT" if (frm or "").lower() == self.address.lower() else "← IN"
                 peer = to if "OUT" in direction else frm
-                lines.append(
-                    f"  [{i:02d}] {tx.get('txid','?')[:20]}…  "
-                    f"{direction}  {str(peer)[:26]}  "
-                    f"{tx.get(key_val,0):.4f} {unit}"
-                )
+                lines.append(f"  [{i:02d}] TxID        : {tx.get('txid','?')}")
+                lines.append(f"        Direction   : {direction}")
+                lines.append(f"        Counterpart : {peer}")
+                lines.append(f"        Amount      : {tx.get(key_val,0):.6f} {unit}")
+                lines.append("")
+
+        # ── Screening (sanctions / mixer watchlist) ──
+        lines += ["", "── SCREENING — SANCTIONS / MIXER WATCHLIST " + "─" * 21]
+        if self.screening:
+            lines.append(f"  🚨 {len(self.screening)} flagged address(es) found:")
+            for addr, entry in self.screening.items():
+                cats = ", ".join(entry.get("category", []))
+                lines.append(f"    • {addr}")
+                lines.append(f"      Entity   : {entry.get('entity','')}")
+                lines.append(f"      Category : {cats}")
+                lines.append(f"      Program  : {entry.get('program','')} ({entry.get('date','')})")
+                lines.append(f"      Source   : {entry.get('source_url','')}")
+                lines.append("")
+        else:
+            lines.append("  No flagged addresses found in the screened set.")
+        meta = self.screener.stats()
+        lines.append(
+            f"  (Screened against a curated sample of {meta['total_entries']} "
+            f"entries, last updated {meta['last_updated']} — not the full SDN list.)"
+        )
+
+        # ── Multi-hop trace summary ──
+        if self.trace:
+            lines += ["", "── MULTI-HOP TRACE " + "─" * 44]
+            lines.append(f"  Depth          : {self.trace.get('depth', 1)} hop(s)")
+            lines.append(f"  Total traced   : {self.trace.get('total_addresses', 0)} addresses")
+            for hop, count in self.trace.get("hop_counts", {}).items():
+                lines.append(f"  Hop {hop}          : {count} new address(es)")
+            if self.trace.get("flagged"):
+                lines.append(f"  ⚠ {len(self.trace['flagged'])} flagged address(es) within the traced graph")
 
         # ── OSINT ──
         if self.osint:
@@ -190,11 +244,11 @@ class ReportGenerator:
             if chain == "bitcoin":
                 for out in tx.get("outputs", [])[:2]:
                     addr = out.get("address", "?")
-                    val  = f"{out.get('value_btc', 0):.6f} BTC"
+                    val  = f"{out.get('value_btc', 0):.8f} BTC"
                     tx_rows += (
-                        f"<tr><td class='m'>{(tx.get('txid','?'))[:14]}…</td>"
+                        f"<tr><td class='m'>{tx.get('txid','?')}</td>"
                         f"<td><span class='out'>→ OUT</span></td>"
-                        f"<td class='m'>{addr[:26]}…</td>"
+                        f"<td class='m'>{addr}</td>"
                         f"<td>{val}</td></tr>"
                     )
             elif chain in ("ethereum", "tron"):
@@ -206,13 +260,53 @@ class ReportGenerator:
                 d_cls  = "out" if is_out else "in_"
                 d_lbl  = "→ OUT" if is_out else "← IN"
                 peer   = to if is_out else frm
-                val    = f"{tx.get(key_val, 0):.4f} {unit}"
+                val    = f"{tx.get(key_val, 0):.6f} {unit}"
                 tx_rows += (
-                    f"<tr><td class='m'>{(tx.get('txid','?'))[:14]}…</td>"
+                    f"<tr><td class='m'>{tx.get('txid','?')}</td>"
                     f"<td><span class='{d_cls}'>{d_lbl}</span></td>"
-                    f"<td class='m'>{str(peer)[:26]}…</td>"
+                    f"<td class='m'>{peer}</td>"
                     f"<td>{val}</td></tr>"
                 )
+
+        # Screening section
+        screening_rows = "".join(
+            f"<tr><td class='m'>{addr}</td><td>{entry.get('entity','')}</td>"
+            f"<td>{', '.join(entry.get('category', []))}</td>"
+            f"<td>{entry.get('program','')}<br><small>{entry.get('date','')}</small></td></tr>"
+            for addr, entry in self.screening.items()
+        )
+        screening_meta = self.screener.stats()
+        screening_html = f"""
+<div class="card">
+  <h2>🚨 Sanctions / Mixer Screening</h2>
+  {'<div class="warn-strong">⚠ ' + str(len(self.screening)) + ' flagged address(es) found — see below.</div>'
+    if self.screening else '<div class="ok">✓ No flagged addresses found in the screened set.</div>'}
+  {f'''<table style="margin-top:14px">
+    <tr><th>Address</th><th>Entity</th><th>Category</th><th>Program</th></tr>
+    {screening_rows}
+  </table>''' if self.screening else ''}
+  <small style="display:block;margin-top:10px">
+    Screened against a curated sample of {screening_meta['total_entries']} entries
+    (last updated {screening_meta['last_updated']}) — not the full SDN list.
+  </small>
+</div>"""
+
+        # Multi-hop trace section
+        trace_html = ""
+        if self.trace:
+            hop_rows = "".join(
+                f"<div class='stat'><span>{count}</span>Hop {hop}</div>"
+                for hop, count in self.trace.get("hop_counts", {}).items()
+            )
+            trace_html = f"""
+<div class="card">
+  <h2>🔀 Multi-hop Trace</h2>
+  <div class="grid4">
+    <div class="stat"><span>{self.trace.get('depth',1)}</span>Depth</div>
+    <div class="stat"><span>{self.trace.get('total_addresses',0)}</span>Total addresses</div>
+    {hop_rows}
+  </div>
+</div>"""
 
         # OSINT section
         osint_html = ""
@@ -301,7 +395,7 @@ table{{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}}
 th{{background:#0d0d1a;padding:9px 10px;text-align:left;color:#818cf8;font-weight:600}}
 td{{padding:7px 10px;border-bottom:1px solid #1e1b4b}}
 tr:hover td{{background:#1a1a30}}
-.m{{font-family:monospace}}
+.m{{font-family:monospace;word-break:break-all;font-size:11px}}
 .out{{color:#f87171;font-weight:600}}
 .in_{{color:#34d399;font-weight:600}}
 .by{{color:#64748b;font-size:11px;margin-left:6px}}
@@ -309,6 +403,8 @@ ul{{list-style:none;padding:0}}
 li{{padding:5px 0;border-bottom:1px solid #1e1b4b;font-size:12px}}
 .err{{background:#1c0f0f;border:1px solid #7f1d1d;color:#fca5a5;padding:10px;border-radius:8px;margin-top:10px;font-size:12px}}
 .warn{{background:#1a1200;border:1px solid #78350f;color:#fcd34d;padding:10px;border-radius:8px;text-align:center;font-size:12px;margin-top:20px}}
+.warn-strong{{background:#1c0f0f;border:1px solid #7f1d1d;color:#fca5a5;padding:12px;border-radius:8px;font-weight:600;font-size:13px}}
+.ok{{background:#0f1c14;border:1px solid #166534;color:#86efac;padding:12px;border-radius:8px;font-weight:600;font-size:13px}}
 .ts{{font-size:11px;color:#475569;margin-top:6px}}
 </style>
 </head>
@@ -340,6 +436,10 @@ li{{padding:5px 0;border-bottom:1px solid #1e1b4b;font-size:12px}}
 </div>
 
 {osint_html}
+
+{screening_html}
+
+{trace_html}
 
 <div class="warn">
   ⚠ This report was generated for educational / research purposes only.<br>
