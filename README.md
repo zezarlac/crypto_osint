@@ -30,7 +30,7 @@ wallet comparison, and surface-level identity correlation from public web data.
 
 ```bash
 git clone https://github.com/zezarlac/crypto_osint
-cd crypto-wallet-osint
+cd crypto_osint
 pip install -r requirements.txt
 ```
 
