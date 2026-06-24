@@ -43,7 +43,7 @@ BANNER = """\
  ██║     ██╔══██╗  ╚██╔╝  ██╔═══╝    ██║   ██║   ██║   ██║   ██║╚════██║██║██║╚██╗██║   ██║
  ╚██████╗██║  ██║   ██║   ██║        ██║   ╚██████╔╝   ╚██████╔╝███████║██║██║ ╚████║   ██║
   ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝        ╚═╝    ╚═════╝     ╚═════╝ ╚══════╝╚═╝╚═╝  ╚═══╝   ╚═╝[/bold purple]
-[dim]              Cryptocurrency Wallet OSINT Tool  ·  Educational Use Only[/dim]
+[dim]              Cryptocurrency Wallet OSINT Tool BY zezarlac ·  Educational Use Only[/dim]
 """
 
 
@@ -398,23 +398,31 @@ def main():
             print_pivot_table(osint_data["pivot"])
             console.print()
 
-    # ── Step 6: Transaction graph ─────────────────────────────
-    graph_path = ""
+    # ── Step 6: Transaction graphs (3 formats) ────────────────
+    graph_paths = {}
     if args.graph:
-        console.print("[yellow]⟳[/yellow]  Building transaction graph…")
+        console.print(
+            "[yellow]⟳[/yellow]  Building transaction graphs "
+            "(hierarchical PNG · interactive D3.js · Sankey HTML)…"
+        )
         if trace_result:
             grapher = TransactionGraph.from_trace(trace_result)
         else:
             grapher = TransactionGraph(wallet_data, depth=1)
             grapher.build()
 
-        stats      = grapher.get_stats()
-        graph_path = grapher.visualize(args.address, out_dir="reports")
-        flag_note  = f" · [red]{len(stats['flagged'])} flagged[/red]" if stats["flagged"] else ""
+        stats = grapher.get_stats()
+        flag_note = f" · [red]{len(stats['flagged'])} flagged[/red]" if stats["flagged"] else ""
+
+        graph_paths["png"]    = grapher.visualize_hierarchical(args.address, out_dir="reports")
+        graph_paths["d3"]     = grapher.export_interactive_html(output_dir="reports")
+        graph_paths["sankey"] = grapher.export_sankey_html(output_dir="reports")
+
         console.print(
-            f"[green]✓[/green]  Graph: "
-            f"[bold]{stats['nodes']}[/bold] nodes · "
-            f"[bold]{stats['edges']}[/bold] edges{flag_note} → {graph_path}"
+            f"[green]✓[/green]  {stats['nodes']} nodes · {stats['edges']} edges{flag_note}\n"
+            f"    📊 [cyan]{os.path.basename(graph_paths['png'])}[/cyan] — hierarchical rings by hop (PNG)\n"
+            f"    🌐 [cyan]{os.path.basename(graph_paths['d3'])}[/cyan] — zoom/pan/filter in browser\n"
+            f"    💰 [cyan]{os.path.basename(graph_paths['sankey'])}[/cyan] — money flow diagram"
         )
         console.print()
 
@@ -432,10 +440,12 @@ def main():
     summary_lines = [f"[bold green]✓ Analysis complete — {chain.upper()}[/bold green]"]
     summary_lines.append(f"   Address  : {args.address}")
     if trace_result:
-        summary_lines.append(f"   Trace    : depth {trace_result.get('depth')} · "
-                              f"{trace_result.get('total_addresses')} addresses")
-    if graph_path:
-        summary_lines.append(f"   Graph    : {graph_path}")
+        summary_lines.append(
+            f"   Trace    : depth {trace_result.get('depth')} · "
+            f"{trace_result.get('total_addresses')} addresses"
+        )
+    if graph_paths:
+        summary_lines.append(f"   Graphs   : reports/ ({len(graph_paths)} files — PNG + D3.js + Sankey)")
     if screening:
         summary_lines.append(f"   [red]⚠ Watchlist : {len(screening)} match(es)[/red]")
     summary_lines.append(f"   Reports  : {os.path.dirname(paths[0]) if paths else 'reports/'}")
