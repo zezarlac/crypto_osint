@@ -404,8 +404,116 @@ def _graph_flags_sanctioned_node():
     stats = g.get_stats()
     assert "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3" in stats["flagged"]
 
-test("TransactionGraph.from_trace() builds multi-hop graph", _graph_from_trace)
-test("Graph auto-flags sanctioned addresses",                _graph_flags_sanctioned_node)
+test("Bitcoin graph builds correctly",   _graph_bitcoin)
+test("Ethereum graph nodes & edges",     _graph_eth)
+test("Graph JSON export works",          _graph_export)
+
+def _graph_from_trace():
+    fake_trace = {
+        "target": "TARGET_X", "chain": "bitcoin", "depth": 2,
+        "nodes": {
+            "TARGET_X": {"hop": 0},
+            "HOP1_A":   {"hop": 1},
+            "HOP2_A":   {"hop": 2},
+        },
+        "edges": [
+            {"from": "TARGET_X", "to": "HOP1_A", "txid": "tx1", "value": 1.0, "hop": 1},
+            {"from": "HOP1_A",   "to": "HOP2_A", "txid": "tx2", "value": 0.5, "hop": 2},
+        ],
+        "hop_counts": {1: 1, 2: 1},
+        "flagged": {},
+        "total_addresses": 3,
+    }
+    g = TransactionGraph.from_trace(fake_trace)
+    stats = g.get_stats()
+    assert stats["nodes"] == 3, stats["nodes"]
+    assert stats["edges"] == 2, stats["edges"]
+    assert g.depth == 2
+
+def _graph_flags_sanctioned_node():
+    wallet = {
+        "address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na", "chain": "bitcoin",
+        "transactions": [
+            {"txid": "tx1", "inputs": ["1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na"],
+             "outputs": [{"address": "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3", "value_btc": 1.0}]},
+        ],
+    }
+    g = TransactionGraph(wallet)
+    g.build()
+    assert "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3" in g.get_stats()["flagged"]
+
+# ── Visualization methods (3 formats) ───────────────────────
+
+def _graph_hierarchical_png():
+    """visualize_hierarchical() should create a .png file."""
+    g = TransactionGraph.from_trace({
+        "target": "ADDR_TARGET", "chain": "bitcoin", "depth": 2,
+        "nodes": {"ADDR_TARGET": {"hop": 0}, "ADDR_HOP1": {"hop": 1}, "ADDR_HOP2": {"hop": 2}},
+        "edges": [
+            {"from": "ADDR_TARGET", "to": "ADDR_HOP1", "txid": "tx1", "value": 1.0, "hop": 1},
+            {"from": "ADDR_HOP1",   "to": "ADDR_HOP2", "txid": "tx2", "value": 0.5, "hop": 2},
+        ],
+        "hop_counts": {}, "flagged": {}, "total_addresses": 3,
+    })
+    out = tempfile.mkdtemp()
+    path = g.visualize_hierarchical(out_dir=out)
+    assert path.endswith(".png") and os.path.exists(path), f"PNG not created: {path}"
+    shutil.rmtree(out, ignore_errors=True)
+
+def _graph_interactive_html():
+    """export_interactive_html() should create a valid D3.js HTML file."""
+    g = TransactionGraph(FAKE_WALLET)
+    g.build()
+    out = tempfile.mkdtemp()
+    path = g.export_interactive_html(output_dir=out)
+    assert path.endswith(".html") and os.path.exists(path)
+    content = open(path).read()
+    assert "d3js.org" in content,       "Missing D3.js script"
+    assert "hop-filter" in content,     "Missing hop filter control"
+    assert "resetZoom" in content,      "Missing zoom reset"
+    shutil.rmtree(out, ignore_errors=True)
+
+def _graph_sankey_html():
+    """export_sankey_html() should create a valid Sankey HTML file."""
+    g = TransactionGraph(FAKE_WALLET)
+    g.build()
+    out = tempfile.mkdtemp()
+    path = g.export_sankey_html(output_dir=out)
+    assert path.endswith(".html") and os.path.exists(path)
+    content = open(path).read()
+    assert "sankeyLinkHorizontal" in content, "Missing Sankey link layout call"
+    assert "Money Flow" in content,           "Missing Sankey title"
+    shutil.rmtree(out, ignore_errors=True)
+
+def _graph_all_three_formats():
+    """All 3 visualization methods work together on the same graph."""
+    trace = {
+        "target": "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na", "chain": "bitcoin", "depth": 2,
+        "nodes": {
+            "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na": {"hop": 0},
+            "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2":   {"hop": 1},
+            "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3":   {"hop": 2},  # Blender.io
+        },
+        "edges": [
+            {"from": "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf8Na", "to": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "txid": "t1", "value": 5.0, "hop": 1},
+            {"from": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "to": "3K35dyL85fR9ht7UgzPfd1gLRRXQtNTqE3", "txid": "t2", "value": 4.8, "hop": 2},
+        ],
+        "hop_counts": {1: 1, 2: 1}, "flagged": {}, "total_addresses": 3,
+    }
+    g = TransactionGraph.from_trace(trace)
+    out = tempfile.mkdtemp()
+    p1 = g.visualize_hierarchical(out_dir=out)
+    p2 = g.export_interactive_html(output_dir=out)
+    p3 = g.export_sankey_html(output_dir=out)
+    assert all(os.path.exists(p) for p in (p1, p2, p3)), "One or more output files missing"
+    shutil.rmtree(out, ignore_errors=True)
+
+test("TransactionGraph.from_trace() builds multi-hop graph",   _graph_from_trace)
+test("Graph auto-flags sanctioned addresses",                    _graph_flags_sanctioned_node)
+test("visualize_hierarchical() creates PNG",                     _graph_hierarchical_png)
+test("export_interactive_html() creates D3.js HTML",             _graph_interactive_html)
+test("export_sankey_html() creates Sankey HTML",                 _graph_sankey_html)
+test("All 3 visualization methods work together",                _graph_all_three_formats)
 
 # ── 4. OSINT entity extractor (no-network) ────────────────────
 print(f"\n{BOLD}[4] OSINT — Entity Extractor{RESET}")
