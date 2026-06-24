@@ -209,6 +209,122 @@ class TransactionGraph:
         plt.close()
         return fname
 
+    def visualize_hierarchical(self, output_name: str = "wallet", out_dir: str = ".") -> str:
+        """Hierarchical layout: target center, hops in concentric rings."""
+        if not self.G.nodes:
+            return ""
+        n = len(self.G.nodes)
+        fig_w, fig_h = max(18, min(32, 12 + n * 0.7)), max(12, min(22, 8 + n * 0.5))
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        fig.patch.set_facecolor("#0d0d1a")
+        ax.set_facecolor("#0d0d1a")
+
+        pos, target, hops = {}, self.target, {}
+        for nd in self.G.nodes():
+            h = self.G.nodes[nd].get("hop", 1)
+            if h not in hops: hops[h] = []
+            hops[h].append(nd)
+        pos[target] = (0, 0)
+        for hop in sorted(hops.keys()):
+            if hop == 0: continue
+            for i, nd in enumerate(hops[hop]):
+                radius, angle = 2.5 + (hop - 1) * 3.5, 2 * math.pi * i / max(len(hops[hop]), 1)
+                pos[nd] = (radius * math.cos(angle), radius * math.sin(angle))
+
+        nx.draw_networkx_edges(self.G, pos, edge_color="#94a3b8", arrows=True, arrowsize=16, alpha=0.45, width=1.0, ax=ax, connectionstyle="arc3,rad=0.08")
+        nodelist = list(self.G.nodes())
+        colors = [_HOP_COLORS.get(self.G.nodes[nd].get("hop", 1), "#6366f1") for nd in nodelist]
+        sizes = [2400 if nd == target else 700 - (self.G.nodes[nd].get("hop", 1) - 1) * 100 for nd in nodelist]
+        edge_colors = [_FLAG_BORDER if self.G.nodes[nd].get("flagged") else "#0d0d1a" for nd in nodelist]
+        line_widths = [2.8 if self.G.nodes[nd].get("flagged") else 0.5 for nd in nodelist]
+
+        nx.draw_networkx_nodes(self.G, pos, nodelist=nodelist, node_color=colors, node_size=sizes, alpha=0.95, ax=ax, edgecolors=edge_colors, linewidths=line_widths)
+
+        labels = {nd: (_wrap_address(nd) + ("\n▶ TARGET" if nd == target else "") + (f"\n⚠ {self.G.nodes[nd]['flagged'].get('entity', 'FLAGGED')}" if self.G.nodes[nd].get("flagged") else "")) for nd in nodelist}
+        nx.draw_networkx_labels(self.G, pos, labels, font_size=5.5, font_color="#e2e8f0", font_family="monospace", ax=ax, bbox=dict(facecolor="#13131f", edgecolor="#3730a3", boxstyle="round,pad=0.25", alpha=0.85, linewidth=0.6))
+
+        legend_handles = [mpatches.Patch(color=_HOP_COLORS[0], label="Target"), mpatches.Patch(color=_HOP_COLORS[1], label="Hop 1")]
+        if self.depth >= 2: legend_handles.append(mpatches.Patch(color=_HOP_COLORS[2], label="Hop 2"))
+        if self.depth >= 3: legend_handles.append(mpatches.Patch(color=_HOP_COLORS[3], label="Hop 3"))
+        if any(self.G.nodes[nd].get("flagged") for nd in nodelist): legend_handles.append(mpatches.Patch(facecolor="#1e1e3f", edgecolor=_FLAG_BORDER, linewidth=2.5, label="⚠ Flagged"))
+        ax.legend(handles=legend_handles, facecolor="#1e1e3f", labelcolor="white", loc="upper left", fontsize=8)
+        flagged_n = sum(1 for nd in nodelist if self.G.nodes[nd].get("flagged"))
+        ax.set_title(f"Hierarchical Graph  |  {self.chain.upper()}  |  depth={self.depth}\n{self.target}\n{n} addresses · {len(self.G.edges)} connections" + (f"  ·  ⚠ {flagged_n} flagged" if flagged_n else ""), color="white", fontsize=9, pad=14, family="monospace")
+        ax.axis("off")
+        plt.tight_layout()
+        os.makedirs(out_dir, exist_ok=True)
+        fname = os.path.join(out_dir, f"graph_hierarchical_{self.target[:10]}.png")
+        plt.savefig(fname, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close()
+        return fname
+
+    def export_interactive_html(self, output_dir: str = ".") -> str:
+        """Interactive D3.js graph: zoom, pan, filter by hop, click for details."""
+        data = nx.node_link_data(self.G)
+        for node in data["nodes"]:
+            attrs = self.G.nodes[node["id"]]
+            node["hop"], node["flagged"] = attrs.get("hop", 1), bool(attrs.get("flagged"))
+            if attrs.get("flagged"): node["entity"] = attrs["flagged"].get("entity", "")
+
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width"><title>Interactive Graph</title>
+<script src="https://d3js.org/d3.v7.min.js"></script><style>
+body{{background:#0d0d1a;color:#e2e8f0;margin:0;padding:10px;font-family:Segoe UI}}#container{{width:100%;height:100vh}}svg{{background:#0d0d1a;border:1px solid #1e1b4b;border-radius:8px}}#info,#controls{{position:absolute;background:#13131f;border:1px solid #1e1b4b;padding:12px;border-radius:8px;font-size:12px;z-index:10}}#info{{top:10px;left:10px;max-width:300px}}#controls{{bottom:10px;left:10px}}button{{background:#312e81;color:#a5b4fc;border:1px solid #3730a3;padding:6px 12px;border-radius:4px;cursor:pointer;margin:2px;font-size:11px}}button:hover{{background:#3730a3}}.node{{cursor:pointer}}.node.flagged{{stroke:#facc15!important;stroke-width:2.5px}}.link{{stroke:#94a3b8;stroke-opacity:0.5}}text{{pointer-events:none;font-size:9px;fill:#e2e8f0}}
+</style></head><body>
+<div id="container"><svg id="graph"></svg></div>
+<div id="info"><strong>Graph</strong><div id="selected-info" style="margin-top:8px"></div></div>
+<div id="controls">Filter: <select id="hop-filter" style="background:#312e81;color:#a5b4fc;border:1px solid #3730a3;padding:4px"><option value="">All hops</option><option value="1">≤ 1 hop</option><option value="2">≤ 2 hops</option><option value="3">≤ 3 hops</option></select><button onclick="resetZoom()">Reset</button></div>
+
+<script>
+const data={json.dumps(data)},width=window.innerWidth-20,height=window.innerHeight-20;
+const svg=d3.select("#graph").attr("width",width).attr("height",height);
+const g=svg.append("g");
+svg.call(d3.zoom().on("zoom",e=>g.attr("transform",e.transform)));
+const hopColor=d3.scaleOrdinal().domain([0,1,2,3]).range(["#ef4444","#6366f1","#22d3ee","#f59e0b"]);
+const sim=d3.forceSimulation(data.nodes).force("link",d3.forceLink(data.links).id(d=>d.id).distance(60)).force("charge",d3.forceManyBody().strength(-300)).force("center",d3.forceCenter(width/2,height/2));
+const link=g.selectAll(".link").data(data.links).enter().append("line").attr("class","link").attr("stroke","#94a3b8").attr("stroke-width",1.5);
+const node=g.selectAll(".node").data(data.nodes).enter().append("circle").attr("class",d=>"node"+(d.flagged?" flagged":"")).attr("r",d=>d.id==="{self.target}"?12:6).attr("fill",d=>hopColor(d.hop)).attr("stroke",d=>d.flagged?"#facc15":"#0d0d1a").attr("stroke-width",d=>d.flagged?2.5:1.5).on("click",(e,d)=>document.getElementById("selected-info").innerHTML=`<strong>${{d.id.substring(0,16)}}…</strong><br>Hop: ${{d.hop}}<br>${{d.flagged?"⚠ "+d.entity:""}}`).call(d3.drag().on("start",e=>{{if(!e.active)sim.alphaTarget(0.3).restart();e.subject.fx=e.x;e.subject.fy=e.y;}}).on("drag",e=>{{e.subject.fx=e.x;e.subject.fy=e.y;}}).on("end",e=>{{if(!e.active)sim.alphaTarget(0);e.subject.fx=null;e.subject.fy=null;}}));
+const labels=g.selectAll(".label").data(data.nodes).enter().append("text").attr("text-anchor","middle").attr("dy",".3em").text(d=>d.id.substring(0,5)+"…"+d.id.slice(-3)).style("font-size","8px");
+sim.on("tick",()=>{{link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);node.attr("cx",d=>d.x).attr("cy",d=>d.y);labels.attr("x",d=>d.x).attr("y",d=>d.y);}});
+document.getElementById("hop-filter").addEventListener("change",e=>{{const f=e.target.value?parseInt(e.target.value):null;node.style("opacity",d=>!f||d.hop<=f?1:0.1);link.style("opacity",d=>!f||(d.source.hop<=f&&d.target.hop<=f)?0.5:0.05);}});
+function resetZoom(){{svg.transition().duration(750).call(d3.zoom().transform,d3.zoomIdentity.translate(width/2,height/2));}}
+</script></body></html>"""
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, f"graph_interactive_{self.target[:10]}.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path
+
+    def export_sankey_html(self, output_dir: str = ".") -> str:
+        """Sankey diagram showing money flow between wallets."""
+        nodes_list, node_idx = list(self.G.nodes()), {}
+        for i, n in enumerate(nodes_list): node_idx[n] = i
+        sankey_nodes = [{"name": (n[:10]+"…") if n != self.target else "TARGET", "hop": self.G.nodes[n].get("hop", 1), "flagged": bool(self.G.nodes[n].get("flagged"))} for n in nodes_list]
+        sankey_links = [{"source": node_idx[src], "target": node_idx[dst], "value": max(0.1, data.get("value", 0.001))} for src, dst, data in self.G.edges(data=True)]
+
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Money Flow (Sankey)</title><script src="https://d3js.org/d3.v7.min.js"></script>
+<style>body{{background:#0d0d1a;color:#e2e8f0;margin:0;padding:20px;font-family:Segoe UI}}h2{{color:#a5b4fc}}svg{{background:#0d0d1a}}.node rect{{stroke:#0d0d1a;stroke-width:1px}}.link{{stroke-opacity:0.5}}.flagged rect{{stroke:#facc15;stroke-width:2px}}</style></head><body>
+<h2>💰 Money Flow Diagram</h2><svg id="sankey"></svg>
+<script>
+const nodes={json.dumps(sankey_nodes)},links={json.dumps(sankey_links)};
+const width=Math.min(1200,window.innerWidth-40),height=Math.max(400,Math.ceil(nodes.length*1.5)*25);
+const svg=d3.select("#sankey").append("svg").attr("width",width).attr("height",height);
+const sankey=d3.sankey().nodeWidth(15).nodePadding(Math.max(30,height/nodes.length/2)).extent([[1,1],[width-1,height-20]]);
+const {{nodes:sn,links:sl}}=sankey({{nodes:nodes.map(d=>Object.assign({{}},d)),links}});
+const hopColor=d3.scaleOrdinal().domain([0,1,2,3]).range(["#ef4444","#6366f1","#22d3ee","#f59e0b"]);
+svg.selectAll(".link").data(sl).enter().append("path").attr("d",d3.sankeyLinkHorizontal()).attr("stroke",d=>hopColor(Math.max(d.source.hop,d.target.hop))).attr("stroke-width",d=>Math.max(1,d.width)).attr("stroke-opacity",0.5);
+const ng=svg.selectAll(".node").data(sn).enter().append("g").attr("class",d=>"node"+(d.flagged?" flagged":""));
+ng.append("rect").attr("x",d=>d.x0).attr("y",d=>d.y0).attr("height",d=>d.y1-d.y0).attr("width",d=>d.x1-d.x0).attr("fill",d=>hopColor(d.hop)).attr("stroke",d=>d.flagged?"#facc15":"#0d0d1a").attr("stroke-width",d=>d.flagged?2:1);
+ng.append("text").attr("x",d=>d.x0<width/2?d.x1+6:d.x0-6).attr("y",d=>(d.y1+d.y0)/2).attr("dy","0.35em").attr("text-anchor",d=>d.x0<width/2?"start":"end").text(d=>d.name).style("font-size","10px");
+</script></body></html>"""
+
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, f"graph_sankey_{self.target[:10]}.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path
+
     # ── Stats & Export ────────────────────────────────────────
 
     def get_stats(self) -> dict:
