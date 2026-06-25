@@ -269,25 +269,109 @@ class TransactionGraph:
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width"><title>Interactive Graph</title>
 <script src="https://d3js.org/d3.v7.min.js"></script><style>
-body{{background:#0d0d1a;color:#e2e8f0;margin:0;padding:10px;font-family:Segoe UI}}#container{{width:100%;height:100vh}}svg{{background:#0d0d1a;border:1px solid #1e1b4b;border-radius:8px}}#info,#controls{{position:absolute;background:#13131f;border:1px solid #1e1b4b;padding:12px;border-radius:8px;font-size:12px;z-index:10}}#info{{top:10px;left:10px;max-width:300px}}#controls{{bottom:10px;left:10px}}button{{background:#312e81;color:#a5b4fc;border:1px solid #3730a3;padding:6px 12px;border-radius:4px;cursor:pointer;margin:2px;font-size:11px}}button:hover{{background:#3730a3}}.node{{cursor:pointer}}.node.flagged{{stroke:#facc15!important;stroke-width:2.5px}}.link{{stroke:#94a3b8;stroke-opacity:0.5}}text{{pointer-events:none;font-size:9px;fill:#e2e8f0}}
+body{{background:#0d0d1a;color:#e2e8f0;margin:0;padding:10px;font-family:Segoe UI}}
+#container{{width:100%;height:100vh}}
+svg{{background:#0d0d1a;border:1px solid #1e1b4b;border-radius:8px}}
+#info,#controls{{position:absolute;background:#13131f;border:1px solid #1e1b4b;padding:12px;border-radius:8px;font-size:12px;z-index:10}}
+#info{{top:10px;left:10px;max-width:360px}}
+#controls{{bottom:10px;left:10px}}
+button{{background:#312e81;color:#a5b4fc;border:1px solid #3730a3;padding:6px 12px;border-radius:4px;cursor:pointer;margin:2px;font-size:11px}}
+button:hover{{background:#3730a3}}
+.node{{cursor:pointer}}
+.node.flagged{{stroke:#facc15!important;stroke-width:2.5px}}
+.link{{stroke:#94a3b8;stroke-opacity:0.5}}
+text{{pointer-events:none;font-size:9px;fill:#e2e8f0}}
+#addr-full{{font-family:monospace;font-size:10px;word-break:break-all;color:#a5b4fc;margin-top:4px;line-height:1.5}}
+.flag-badge{{color:#facc15;font-weight:600;margin-top:4px}}
+.hop-badge{{display:inline-block;padding:1px 7px;border-radius:8px;font-size:10px;margin-top:4px}}
 </style></head><body>
 <div id="container"><svg id="graph"></svg></div>
-<div id="info"><strong>Graph</strong><div id="selected-info" style="margin-top:8px"></div></div>
-<div id="controls">Filter: <select id="hop-filter" style="background:#312e81;color:#a5b4fc;border:1px solid #3730a3;padding:4px"><option value="">All hops</option><option value="1">≤ 1 hop</option><option value="2">≤ 2 hops</option><option value="3">≤ 3 hops</option></select><button onclick="resetZoom()">Reset</button></div>
+<div id="info">
+  <strong style="color:#818cf8">🔍 Click a node to inspect</strong>
+  <div id="selected-info" style="margin-top:8px"></div>
+</div>
+<div id="controls">
+  Filter:
+  <select id="hop-filter" style="background:#312e81;color:#a5b4fc;border:1px solid #3730a3;padding:4px">
+    <option value="">All hops</option>
+    <option value="1">≤ 1 hop</option>
+    <option value="2">≤ 2 hops</option>
+    <option value="3">≤ 3 hops</option>
+  </select>
+  <button onclick="resetZoom()">Reset Zoom</button>
+</div>
 
 <script>
-const data={json.dumps(data)},width=window.innerWidth-20,height=window.innerHeight-20;
+const data={json.dumps(data)};
+const width=window.innerWidth-20, height=window.innerHeight-20;
 const svg=d3.select("#graph").attr("width",width).attr("height",height);
 const g=svg.append("g");
 svg.call(d3.zoom().on("zoom",e=>g.attr("transform",e.transform)));
+
 const hopColor=d3.scaleOrdinal().domain([0,1,2,3]).range(["#ef4444","#6366f1","#22d3ee","#f59e0b"]);
-const sim=d3.forceSimulation(data.nodes).force("link",d3.forceLink(data.links).id(d=>d.id).distance(60)).force("charge",d3.forceManyBody().strength(-300)).force("center",d3.forceCenter(width/2,height/2));
-const link=g.selectAll(".link").data(data.links).enter().append("line").attr("class","link").attr("stroke","#94a3b8").attr("stroke-width",1.5);
-const node=g.selectAll(".node").data(data.nodes).enter().append("circle").attr("class",d=>"node"+(d.flagged?" flagged":"")).attr("r",d=>d.id==="{self.target}"?12:6).attr("fill",d=>hopColor(d.hop)).attr("stroke",d=>d.flagged?"#facc15":"#0d0d1a").attr("stroke-width",d=>d.flagged?2.5:1.5).on("click",(e,d)=>document.getElementById("selected-info").innerHTML=`<strong>${{d.id.substring(0,16)}}…</strong><br>Hop: ${{d.hop}}<br>${{d.flagged?"⚠ "+d.entity:""}}`).call(d3.drag().on("start",e=>{{if(!e.active)sim.alphaTarget(0.3).restart();e.subject.fx=e.x;e.subject.fy=e.y;}}).on("drag",e=>{{e.subject.fx=e.x;e.subject.fy=e.y;}}).on("end",e=>{{if(!e.active)sim.alphaTarget(0);e.subject.fx=null;e.subject.fy=null;}}));
-const labels=g.selectAll(".label").data(data.nodes).enter().append("text").attr("text-anchor","middle").attr("dy",".3em").text(d=>d.id.substring(0,5)+"…"+d.id.slice(-3)).style("font-size","8px");
-sim.on("tick",()=>{{link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);node.attr("cx",d=>d.x).attr("cy",d=>d.y);labels.attr("x",d=>d.x).attr("y",d=>d.y);}});
-document.getElementById("hop-filter").addEventListener("change",e=>{{const f=e.target.value?parseInt(e.target.value):null;node.style("opacity",d=>!f||d.hop<=f?1:0.1);link.style("opacity",d=>!f||(d.source.hop<=f&&d.target.hop<=f)?0.5:0.05);}});
-function resetZoom(){{svg.transition().duration(750).call(d3.zoom().transform,d3.zoomIdentity.translate(width/2,height/2));}}
+const hopLabel={{0:"Target",1:"Hop 1",2:"Hop 2",3:"Hop 3"}};
+
+const sim=d3.forceSimulation(data.nodes)
+  .force("link",d3.forceLink(data.links).id(d=>d.id).distance(70))
+  .force("charge",d3.forceManyBody().strength(-320))
+  .force("center",d3.forceCenter(width/2,height/2))
+  .force("collision",d3.forceCollide().radius(18));
+
+const link=g.selectAll(".link").data(data.links).enter()
+  .append("line").attr("class","link").attr("stroke","#94a3b8").attr("stroke-width",1.5);
+
+const node=g.selectAll(".node").data(data.nodes).enter()
+  .append("circle")
+  .attr("class",d=>"node"+(d.flagged?" flagged":""))
+  .attr("r",d=>d.id==="{self.target}"?14:7)
+  .attr("fill",d=>hopColor(d.hop))
+  .attr("stroke",d=>d.flagged?"#facc15":"#0d0d1a")
+  .attr("stroke-width",d=>d.flagged?2.5:1.5)
+  .on("click",(e,d)=>{{
+    const hopBg={{0:"#450a0a",1:"#1e1b4b",2:"#0c2e33",3:"#1c1000"}};
+    const flagHtml=d.flagged
+      ? `<div class="flag-badge">⚠ ${{d.entity}}</div>` : "";
+    document.getElementById("selected-info").innerHTML=`
+      <div class="hop-badge" style="background:${{hopBg[d.hop]||"#1e1b4b"}};color:${{hopColor(d.hop)}}">
+        ${{hopLabel[d.hop]||"Hop "+d.hop}}
+      </div>
+      ${{flagHtml}}
+      <div id="addr-full">${{d.id}}</div>
+      <button onclick="navigator.clipboard.writeText('${{d.id}}').then(()=>this.textContent='✓ Copied').catch(()=>{{}})"
+        style="margin-top:6px;font-size:10px;padding:3px 8px">Copy address</button>
+    `;
+  }})
+  .call(d3.drag()
+    .on("start",e=>{{if(!e.active)sim.alphaTarget(0.3).restart();e.subject.fx=e.x;e.subject.fy=e.y;}})
+    .on("drag",e=>{{e.subject.fx=e.x;e.subject.fy=e.y;}})
+    .on("end",e=>{{if(!e.active)sim.alphaTarget(0);e.subject.fx=null;e.subject.fy=null;}}));
+
+const labels=g.selectAll(".label").data(data.nodes).enter()
+  .append("text")
+  .attr("text-anchor","middle")
+  .attr("dy",".3em")
+  .text(d=>d.id.substring(0,6)+"…"+d.id.slice(-4))
+  .style("font-size","8px")
+  .style("font-family","monospace");
+
+sim.on("tick",()=>{{
+  link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y)
+      .attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+  node.attr("cx",d=>d.x).attr("cy",d=>d.y);
+  labels.attr("x",d=>d.x).attr("y",d=>d.y);
+}});
+
+document.getElementById("hop-filter").addEventListener("change",e=>{{
+  const f=e.target.value?parseInt(e.target.value):null;
+  node.style("opacity",d=>!f||d.hop<=f?1:0.1);
+  link.style("opacity",d=>!f||(d.source.hop<=f&&d.target.hop<=f)?0.5:0.05);
+}});
+
+function resetZoom(){{
+  svg.transition().duration(750).call(
+    d3.zoom().transform, d3.zoomIdentity.translate(width/2,height/2).scale(1)
+  );
+}}
 </script></body></html>"""
         os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, f"graph_interactive_{self.target[:10]}.html")
@@ -299,25 +383,136 @@ function resetZoom(){{svg.transition().duration(750).call(d3.zoom().transform,d3
         """Sankey diagram showing money flow between wallets."""
         nodes_list, node_idx = list(self.G.nodes()), {}
         for i, n in enumerate(nodes_list): node_idx[n] = i
-        sankey_nodes = [{"name": (n[:10]+"…") if n != self.target else "TARGET", "hop": self.G.nodes[n].get("hop", 1), "flagged": bool(self.G.nodes[n].get("flagged"))} for n in nodes_list]
+        sankey_nodes = [{"name": (n[:10]+"…") if n != self.target else "TARGET",
+                         "fullAddr": n,
+                         "hop": self.G.nodes[n].get("hop", 1),
+                         "flagged": bool(self.G.nodes[n].get("flagged")),
+                         "entity": self.G.nodes[n].get("flagged", {}).get("entity", "") if self.G.nodes[n].get("flagged") else ""}
+                        for n in nodes_list]
         sankey_links = [{"source": node_idx[src], "target": node_idx[dst], "value": max(0.1, data.get("value", 0.001))} for src, dst, data in self.G.edges(data=True)]
 
         html = f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Money Flow (Sankey)</title><script src="https://d3js.org/d3.v7.min.js"></script>
-<style>body{{background:#0d0d1a;color:#e2e8f0;margin:0;padding:20px;font-family:Segoe UI}}h2{{color:#a5b4fc}}svg{{background:#0d0d1a}}.node rect{{stroke:#0d0d1a;stroke-width:1px}}.link{{stroke-opacity:0.5}}.flagged rect{{stroke:#facc15;stroke-width:2px}}</style></head><body>
-<h2>💰 Money Flow Diagram</h2><svg id="sankey"></svg>
+<html><head><meta charset="UTF-8"><title>Money Flow (Sankey)</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+<style>
+body{{background:#0d0d1a;color:#e2e8f0;margin:0;padding:20px;font-family:Segoe UI}}
+h2{{color:#a5b4fc;margin-bottom:4px}}
+.subtitle{{font-size:11px;color:#64748b;font-family:monospace;word-break:break-all;margin-bottom:16px}}
+svg{{background:#0d0d1a}}
+.node rect{{stroke-width:1px;rx:3}}
+.link{{stroke-opacity:0.45;fill:none}}
+.link:hover{{stroke-opacity:0.75}}
+.flagged rect{{stroke:#facc15!important;stroke-width:2px}}
+.node-label{{font-size:11px;fill:#e2e8f0;font-family:monospace}}
+#tooltip{{position:fixed;background:#13131f;border:1px solid #1e1b4b;padding:8px 12px;
+          border-radius:6px;font-size:11px;pointer-events:none;display:none;max-width:350px;
+          word-break:break-all;font-family:monospace}}
+</style></head><body>
+<h2>💰 Money Flow Diagram</h2>
+<div class="subtitle">{self.target}</div>
+<div id="tooltip"></div>
+<svg id="sankey"></svg>
+
 <script>
-const nodes={json.dumps(sankey_nodes)},links={json.dumps(sankey_links)};
-const width=Math.min(1200,window.innerWidth-40),height=Math.max(400,Math.ceil(nodes.length*1.5)*25);
-const svg=d3.select("#sankey").append("svg").attr("width",width).attr("height",height);
-const sankey=d3.sankey().nodeWidth(15).nodePadding(Math.max(30,height/nodes.length/2)).extent([[1,1],[width-1,height-20]]);
-const {{nodes:sn,links:sl}}=sankey({{nodes:nodes.map(d=>Object.assign({{}},d)),links}});
-const hopColor=d3.scaleOrdinal().domain([0,1,2,3]).range(["#ef4444","#6366f1","#22d3ee","#f59e0b"]);
-svg.selectAll(".link").data(sl).enter().append("path").attr("d",d3.sankeyLinkHorizontal()).attr("stroke",d=>hopColor(Math.max(d.source.hop,d.target.hop))).attr("stroke-width",d=>Math.max(1,d.width)).attr("stroke-opacity",0.5);
-const ng=svg.selectAll(".node").data(sn).enter().append("g").attr("class",d=>"node"+(d.flagged?" flagged":""));
-ng.append("rect").attr("x",d=>d.x0).attr("y",d=>d.y0).attr("height",d=>d.y1-d.y0).attr("width",d=>d.x1-d.x0).attr("fill",d=>hopColor(d.hop)).attr("stroke",d=>d.flagged?"#facc15":"#0d0d1a").attr("stroke-width",d=>d.flagged?2:1);
-ng.append("text").attr("x",d=>d.x0<width/2?d.x1+6:d.x0-6).attr("y",d=>(d.y1+d.y0)/2).attr("dy","0.35em").attr("text-anchor",d=>d.x0<width/2?"start":"end").text(d=>d.name).style("font-size","10px");
-</script></body></html>"""
+const nodes = {json.dumps(sankey_nodes)};
+const links = {json.dumps(sankey_links)};
+
+const margin = {{top: 10, right: 160, bottom: 10, left: 10}};
+const width  = Math.min(1300, window.innerWidth - 40) - margin.left - margin.right;
+const height = Math.max(500, nodes.length * 32);
+
+const svg = d3.select("#sankey")
+  .attr("width",  width + margin.left + margin.right)
+  .attr("height", height + margin.top  + margin.bottom)
+  .append("g")
+  .attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+
+const hopColor = d3.scaleOrdinal()
+  .domain([0, 1, 2, 3])
+  .range(["#ef4444", "#6366f1", "#22d3ee", "#f59e0b"]);
+
+// Build Sankey layout using the d3-sankey plugin (d3Sankey global)
+const sankeyLayout = d3Sankey.sankey()
+  .nodeId(d => d.id)
+  .nodeWidth(18)
+  .nodePadding(Math.max(20, Math.min(60, height / nodes.length / 1.5)))
+  .extent([[0, 0], [width, height]]);
+
+// Give each node a stable id matching the index
+const graphNodes = nodes.map((d, i) => Object.assign({{}}, d, {{id: i}}));
+const graphLinks = links.map(l => Object.assign({{}}, l));
+
+const {{nodes: sn, links: sl}} = sankeyLayout({{nodes: graphNodes, links: graphLinks}});
+
+// ── Links ──────────────────────────────────────────
+const linkSel = svg.selectAll(".link")
+  .data(sl).enter().append("path")
+  .attr("class", "link")
+  .attr("d", d3Sankey.sankeyLinkHorizontal())
+  .attr("stroke", d => hopColor(Math.max(d.source.hop || 0, d.target.hop || 0)))
+  .attr("stroke-width", d => Math.max(1.5, d.width));
+
+const tip = document.getElementById("tooltip");
+
+linkSel
+  .on("mousemove", (e, d) => {{
+    tip.style.display = "block";
+    tip.style.left = (e.clientX + 12) + "px";
+    tip.style.top  = (e.clientY - 10) + "px";
+    tip.innerHTML  = `<strong>Transfer</strong><br>
+      From: ${{d.source.name}}<br>
+      To: ${{d.target.name}}<br>
+      Value: ${{d.value.toFixed(6)}}`;
+  }})
+  .on("mouseleave", () => tip.style.display = "none");
+
+// ── Nodes ──────────────────────────────────────────
+const nodeGroup = svg.selectAll(".node")
+  .data(sn).enter().append("g")
+  .attr("class", d => "node" + (d.flagged ? " flagged" : ""));
+
+nodeGroup.append("rect")
+  .attr("x",      d => d.x0)
+  .attr("y",      d => d.y0)
+  .attr("height", d => Math.max(2, d.y1 - d.y0))
+  .attr("width",  d => d.x1 - d.x0)
+  .attr("fill",   d => hopColor(d.hop || 0))
+  .attr("stroke", d => d.flagged ? "#facc15" : "#0d0d1a")
+  .on("mousemove", (e, d) => {{
+    tip.style.display = "block";
+    tip.style.left = (e.clientX + 12) + "px";
+    tip.style.top  = (e.clientY - 10) + "px";
+    tip.innerHTML  = `<strong>${{d.flagged ? "⚠ " + d.entity : "Wallet"}}</strong><br>${{d.fullAddr || d.name}}`;
+  }})
+  .on("mouseleave", () => tip.style.display = "none");
+
+// ── Labels (full address, right-aligned, monospace) ──
+nodeGroup.append("text")
+  .attr("class", "node-label")
+  .attr("x", d => d.x1 + 6)
+  .attr("y", d => (d.y0 + d.y1) / 2)
+  .attr("dy", "0.35em")
+  .attr("text-anchor", "start")
+  .text(d => d.fullAddr || d.name)
+  .append("title")               // native tooltip as fallback
+  .text(d => d.fullAddr || d.name);
+
+// Legend
+const legendData = [
+  {{hop:0, label:"Target"}},
+  {{hop:1, label:"Hop 1"}},
+  {{hop:2, label:"Hop 2"}},
+  {{hop:3, label:"Hop 3"}},
+];
+const legend = svg.append("g").attr("transform", `translate(0, ${{height + 30}})`);
+legendData.forEach((d, i) => {{
+  const lg = legend.append("g").attr("transform", `translate(${{i * 110}}, 0)`);
+  lg.append("rect").attr("width", 12).attr("height", 12).attr("fill", hopColor(d.hop)).attr("rx", 2);
+  lg.append("text").attr("x", 16).attr("y", 10).attr("fill", "#e2e8f0").style("font-size", "11px").text(d.label);
+}});
+</script>
+</body></html>"""
 
         os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, f"graph_sankey_{self.target[:10]}.html")
